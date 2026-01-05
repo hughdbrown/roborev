@@ -1,0 +1,242 @@
+package storage
+
+import (
+	"database/sql"
+	"time"
+)
+
+// EnqueueJob creates a new review job
+func (db *DB) EnqueueJob(repoID, commitID int64, agent string) (*ReviewJob, error) {
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, agent, status) VALUES (?, ?, ?, 'queued')`,
+		repoID, commitID, agent)
+	if err != nil {
+		return nil, err
+	}
+
+	id, _ := result.LastInsertId()
+	return &ReviewJob{
+		ID:         id,
+		RepoID:     repoID,
+		CommitID:   commitID,
+		Agent:      agent,
+		Status:     JobStatusQueued,
+		EnqueuedAt: time.Now(),
+	}, nil
+}
+
+// ClaimJob atomically claims the next queued job for a worker
+func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Find and lock the next queued job
+	var job ReviewJob
+	var enqueuedAt string
+	err = tx.QueryRow(`
+		SELECT j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		       r.root_path, r.name, c.sha, c.subject
+		FROM review_jobs j
+		JOIN repos r ON r.id = j.repo_id
+		JOIN commits c ON c.id = j.commit_id
+		WHERE j.status = 'queued'
+		ORDER BY j.enqueued_at
+		LIMIT 1
+	`).Scan(&job.ID, &job.RepoID, &job.CommitID, &job.Agent, &job.Status, &enqueuedAt,
+		&job.RepoPath, &job.RepoName, &job.CommitSHA, &job.CommitSubject)
+	if err == sql.ErrNoRows {
+		return nil, nil // No jobs available
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	job.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
+
+	// Claim it
+	now := time.Now()
+	_, err = tx.Exec(`UPDATE review_jobs SET status = 'running', worker_id = ?, started_at = ? WHERE id = ?`,
+		workerID, now.Format(time.RFC3339), job.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	job.Status = JobStatusRunning
+	job.WorkerID = workerID
+	job.StartedAt = &now
+	return &job, nil
+}
+
+// CompleteJob marks a job as done and stores the review
+func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().Format(time.RFC3339)
+
+	// Update job status
+	_, err = tx.Exec(`UPDATE review_jobs SET status = 'done', finished_at = ? WHERE id = ?`, now, jobID)
+	if err != nil {
+		return err
+	}
+
+	// Insert review
+	_, err = tx.Exec(`INSERT INTO reviews (job_id, agent, prompt, output) VALUES (?, ?, ?, ?)`,
+		jobID, agent, prompt, output)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// FailJob marks a job as failed with an error message
+func (db *DB) FailJob(jobID int64, errorMsg string) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(`UPDATE review_jobs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?`,
+		now, errorMsg, jobID)
+	return err
+}
+
+// ListJobs returns jobs with optional status filter
+func (db *DB) ListJobs(statusFilter string, limit int) ([]ReviewJob, error) {
+	query := `
+		SELECT j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		       j.started_at, j.finished_at, j.worker_id, j.error,
+		       r.root_path, r.name, c.sha, c.subject
+		FROM review_jobs j
+		JOIN repos r ON r.id = j.repo_id
+		JOIN commits c ON c.id = j.commit_id
+	`
+	var args []interface{}
+
+	if statusFilter != "" {
+		query += " WHERE j.status = ?"
+		args = append(args, statusFilter)
+	}
+
+	query += " ORDER BY j.enqueued_at DESC"
+
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []ReviewJob
+	for rows.Next() {
+		var j ReviewJob
+		var enqueuedAt string
+		var startedAt, finishedAt, workerID, errMsg sql.NullString
+
+		err := rows.Scan(&j.ID, &j.RepoID, &j.CommitID, &j.Agent, &j.Status, &enqueuedAt,
+			&startedAt, &finishedAt, &workerID, &errMsg,
+			&j.RepoPath, &j.RepoName, &j.CommitSHA, &j.CommitSubject)
+		if err != nil {
+			return nil, err
+		}
+
+		j.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
+		if startedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, startedAt.String)
+			j.StartedAt = &t
+		}
+		if finishedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, finishedAt.String)
+			j.FinishedAt = &t
+		}
+		if workerID.Valid {
+			j.WorkerID = workerID.String
+		}
+		if errMsg.Valid {
+			j.Error = errMsg.String
+		}
+
+		jobs = append(jobs, j)
+	}
+
+	return jobs, rows.Err()
+}
+
+// GetJobByID returns a job by ID with joined fields
+func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
+	var j ReviewJob
+	var enqueuedAt string
+	var startedAt, finishedAt, workerID, errMsg sql.NullString
+
+	err := db.QueryRow(`
+		SELECT j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		       j.started_at, j.finished_at, j.worker_id, j.error,
+		       r.root_path, r.name, c.sha, c.subject
+		FROM review_jobs j
+		JOIN repos r ON r.id = j.repo_id
+		JOIN commits c ON c.id = j.commit_id
+		WHERE j.id = ?
+	`, id).Scan(&j.ID, &j.RepoID, &j.CommitID, &j.Agent, &j.Status, &enqueuedAt,
+		&startedAt, &finishedAt, &workerID, &errMsg,
+		&j.RepoPath, &j.RepoName, &j.CommitSHA, &j.CommitSubject)
+	if err != nil {
+		return nil, err
+	}
+
+	j.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
+	if startedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, startedAt.String)
+		j.StartedAt = &t
+	}
+	if finishedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, finishedAt.String)
+		j.FinishedAt = &t
+	}
+	if workerID.Valid {
+		j.WorkerID = workerID.String
+	}
+	if errMsg.Valid {
+		j.Error = errMsg.String
+	}
+
+	return &j, nil
+}
+
+// GetJobCounts returns counts of jobs by status
+func (db *DB) GetJobCounts() (queued, running, done, failed int, err error) {
+	rows, err := db.Query(`SELECT status, COUNT(*) FROM review_jobs GROUP BY status`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var count int
+		if err = rows.Scan(&status, &count); err != nil {
+			return
+		}
+		switch JobStatus(status) {
+		case JobStatusQueued:
+			queued = count
+		case JobStatusRunning:
+			running = count
+		case JobStatusDone:
+			done = count
+		case JobStatusFailed:
+			failed = count
+		}
+	}
+	err = rows.Err()
+	return
+}

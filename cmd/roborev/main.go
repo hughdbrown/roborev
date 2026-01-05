@@ -1,0 +1,578 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/user/roborev/internal/config"
+	"github.com/user/roborev/internal/daemon"
+	"github.com/user/roborev/internal/git"
+	"github.com/user/roborev/internal/storage"
+)
+
+var (
+	serverAddr string
+	verbose    bool
+)
+
+func main() {
+	rootCmd := &cobra.Command{
+		Use:   "roborev",
+		Short: "Automatic code review for git commits",
+		Long:  "RoboRev automatically reviews git commits using AI agents (Codex, Claude Code)",
+	}
+
+	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "http://127.0.0.1:7373", "daemon server address")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
+
+	rootCmd.AddCommand(initCmd())
+	rootCmd.AddCommand(enqueueCmd())
+	rootCmd.AddCommand(statusCmd())
+	rootCmd.AddCommand(showCmd())
+	rootCmd.AddCommand(respondCmd())
+	rootCmd.AddCommand(installHookCmd())
+	rootCmd.AddCommand(daemonCmd())
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// getDaemonAddr returns the daemon address from runtime file or default
+func getDaemonAddr() string {
+	if info, err := daemon.ReadRuntime(); err == nil {
+		return fmt.Sprintf("http://%s", info.Addr)
+	}
+	return serverAddr
+}
+
+// ensureDaemon checks if daemon is running, starts it if not
+func ensureDaemon() error {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+
+	// First check runtime file for daemon address
+	if info, err := daemon.ReadRuntime(); err == nil {
+		addr := fmt.Sprintf("http://%s/api/status", info.Addr)
+		resp, err := client.Get(addr)
+		if err == nil {
+			resp.Body.Close()
+			serverAddr = fmt.Sprintf("http://%s", info.Addr)
+			return nil
+		}
+	}
+
+	// Try default address
+	resp, err := client.Get(serverAddr + "/api/status")
+	if err == nil {
+		resp.Body.Close()
+		return nil
+	}
+
+	// Start daemon in background
+	if verbose {
+		fmt.Println("Starting daemon...")
+	}
+
+	roborevdPath, err := exec.LookPath("roborevd")
+	if err != nil {
+		exe, _ := os.Executable()
+		roborevdPath = filepath.Join(filepath.Dir(exe), "roborevd")
+	}
+
+	cmd := exec.Command(roborevdPath)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+
+	// Wait for daemon to be ready and update serverAddr from runtime file
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if info, err := daemon.ReadRuntime(); err == nil {
+			addr := fmt.Sprintf("http://%s", info.Addr)
+			resp, err := client.Get(addr + "/api/status")
+			if err == nil {
+				resp.Body.Close()
+				serverAddr = addr
+				return nil
+			}
+		}
+	}
+
+	return fmt.Errorf("daemon failed to start")
+}
+
+func initCmd() *cobra.Command {
+	var agent string
+
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Initialize roborev in current repository",
+		Long: `Initialize roborev with a single command:
+  - Creates ~/.roborev/ global config directory
+  - Creates .roborev.toml in repo (if --agent specified)
+  - Installs post-commit hook
+  - Starts the daemon`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println("Initializing roborev...")
+
+			// 1. Ensure we're in a git repo
+			root, err := git.GetRepoRoot(".")
+			if err != nil {
+				return fmt.Errorf("not a git repository - run this from inside a git repo")
+			}
+
+			// 2. Create config directory and default config
+			home, _ := os.UserHomeDir()
+			configDir := filepath.Join(home, ".roborev")
+			if err := os.MkdirAll(configDir, 0755); err != nil {
+				return fmt.Errorf("create config dir: %w", err)
+			}
+
+			configPath := filepath.Join(configDir, "config.toml")
+			if _, err := os.Stat(configPath); os.IsNotExist(err) {
+				cfg := config.DefaultConfig()
+				if agent != "" {
+					cfg.DefaultAgent = agent
+				}
+				if err := config.SaveGlobal(cfg); err != nil {
+					return fmt.Errorf("save config: %w", err)
+				}
+				fmt.Printf("  Created config at %s\n", configPath)
+			} else {
+				fmt.Printf("  Config already exists at %s\n", configPath)
+			}
+
+			// 3. Create per-repo config if agent specified
+			repoConfigPath := filepath.Join(root, ".roborev.toml")
+			if agent != "" {
+				if _, err := os.Stat(repoConfigPath); os.IsNotExist(err) {
+					repoConfig := fmt.Sprintf("# RoboRev per-repo configuration\nagent = %q\n", agent)
+					if err := os.WriteFile(repoConfigPath, []byte(repoConfig), 0644); err != nil {
+						return fmt.Errorf("create repo config: %w", err)
+					}
+					fmt.Printf("  Created %s\n", repoConfigPath)
+				}
+			}
+
+			// 4. Install post-commit hook
+			hookPath := filepath.Join(root, ".git", "hooks", "post-commit")
+			hookContent := `#!/bin/sh
+# RoboRev post-commit hook - auto-reviews every commit
+roborev enqueue --sha HEAD 2>/dev/null &
+`
+			// Check for existing hook
+			if existing, err := os.ReadFile(hookPath); err == nil {
+				if !strings.Contains(string(existing), "roborev") {
+					// Append to existing hook
+					hookContent = string(existing) + "\n" + hookContent
+				} else {
+					fmt.Println("  Hook already installed")
+					goto startDaemon
+				}
+			}
+
+			if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+				return fmt.Errorf("install hook: %w", err)
+			}
+			fmt.Printf("  Installed post-commit hook\n")
+
+		startDaemon:
+			// 5. Start daemon
+			if err := ensureDaemon(); err != nil {
+				fmt.Printf("  Warning: %v\n", err)
+				fmt.Println("  Run 'roborev daemon start' to start manually")
+			} else {
+				fmt.Println("  Daemon is running")
+			}
+
+			// 5. Success message
+			fmt.Println()
+			fmt.Println("Ready! Every commit will now be automatically reviewed.")
+			fmt.Println()
+			fmt.Println("Commands:")
+			fmt.Println("  roborev status      - view queue and daemon status")
+			fmt.Println("  roborev show HEAD   - view review for a commit")
+			fmt.Println("  roborev-tui         - interactive terminal UI")
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&agent, "agent", "", "default agent (codex, claude-code)")
+
+	return cmd
+}
+
+func daemonCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "daemon",
+		Short: "Manage the roborev daemon",
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "start",
+		Short: "Start the daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ensureDaemon(); err != nil {
+				return err
+			}
+			fmt.Println("Daemon started")
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "stop",
+		Short: "Stop the daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Send shutdown request or kill process
+			if runtime.GOOS == "windows" {
+				exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
+			} else {
+				exec.Command("pkill", "-f", "roborevd").Run()
+			}
+			fmt.Println("Daemon stopped")
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "restart",
+		Short: "Restart the daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if runtime.GOOS == "windows" {
+				exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
+			} else {
+				exec.Command("pkill", "-f", "roborevd").Run()
+			}
+			time.Sleep(500 * time.Millisecond)
+			if err := ensureDaemon(); err != nil {
+				return err
+			}
+			fmt.Println("Daemon restarted")
+			return nil
+		},
+	})
+
+	return cmd
+}
+
+func enqueueCmd() *cobra.Command {
+	var (
+		repoPath string
+		sha      string
+		agent    string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "enqueue",
+		Short: "Enqueue a commit for review",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Ensure daemon is running
+			if err := ensureDaemon(); err != nil {
+				return err
+			}
+
+			// Default to current directory
+			if repoPath == "" {
+				repoPath = "."
+			}
+
+			// Get repo root
+			root, err := git.GetRepoRoot(repoPath)
+			if err != nil {
+				return fmt.Errorf("not a git repository: %w", err)
+			}
+
+			// Resolve SHA
+			resolvedSHA, err := git.ResolveSHA(root, sha)
+			if err != nil {
+				return fmt.Errorf("invalid commit: %w", err)
+			}
+
+			// Make request
+			reqBody, _ := json.Marshal(map[string]string{
+				"repo_path":  root,
+				"commit_sha": resolvedSHA,
+				"agent":      agent,
+			})
+
+			resp, err := http.Post(serverAddr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))
+			if err != nil {
+				return fmt.Errorf("failed to connect to daemon: %w", err)
+			}
+			defer resp.Body.Close()
+
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusCreated {
+				return fmt.Errorf("enqueue failed: %s", body)
+			}
+
+			var job storage.ReviewJob
+			json.Unmarshal(body, &job)
+
+			fmt.Printf("Enqueued job %d for commit %s (agent: %s)\n", job.ID, shortSHA(resolvedSHA), job.Agent)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&repoPath, "repo", "", "path to git repository (default: current directory)")
+	cmd.Flags().StringVar(&sha, "sha", "HEAD", "commit SHA to review")
+	cmd.Flags().StringVar(&agent, "agent", "", "agent to use (codex, claude-code)")
+
+	return cmd
+}
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show daemon and queue status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Check if daemon is running
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get(serverAddr + "/api/status")
+			if err != nil {
+				fmt.Println("Daemon: not running")
+				fmt.Println()
+				fmt.Println("Start with: roborev daemon start")
+				return nil
+			}
+			defer resp.Body.Close()
+
+			var status storage.DaemonStatus
+			if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+				return fmt.Errorf("failed to parse response: %w", err)
+			}
+
+			fmt.Println("Daemon: running")
+			fmt.Printf("Workers: %d/%d active\n", status.ActiveWorkers, status.MaxWorkers)
+			fmt.Printf("Jobs:    %d queued, %d running, %d completed, %d failed\n",
+				status.QueuedJobs, status.RunningJobs, status.CompletedJobs, status.FailedJobs)
+			fmt.Println()
+
+			// Get recent jobs
+			resp, err = client.Get(serverAddr + "/api/jobs?limit=10")
+			if err != nil {
+				return nil
+			}
+			defer resp.Body.Close()
+
+			var jobsResp struct {
+				Jobs []storage.ReviewJob `json:"jobs"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&jobsResp); err != nil {
+				return nil
+			}
+
+			if len(jobsResp.Jobs) > 0 {
+				fmt.Println("Recent Jobs:")
+				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintf(w, "  ID\tSHA\tRepo\tAgent\tStatus\tTime\n")
+				for _, j := range jobsResp.Jobs {
+					elapsed := ""
+					if j.StartedAt != nil {
+						if j.FinishedAt != nil {
+							elapsed = j.FinishedAt.Sub(*j.StartedAt).Round(time.Second).String()
+						} else {
+							elapsed = time.Since(*j.StartedAt).Round(time.Second).String() + "..."
+						}
+					}
+					fmt.Fprintf(w, "  %d\t%s\t%s\t%s\t%s\t%s\n",
+						j.ID, shortSHA(j.CommitSHA), j.RepoName, j.Agent, j.Status, elapsed)
+				}
+				w.Flush()
+			}
+
+			return nil
+		},
+	}
+}
+
+func showCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show [sha]",
+		Short: "Show review for a commit",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sha := "HEAD"
+			if len(args) > 0 {
+				sha = args[0]
+			}
+
+			// Resolve SHA if in a git repo
+			if root, err := git.GetRepoRoot("."); err == nil {
+				if resolved, err := git.ResolveSHA(root, sha); err == nil {
+					sha = resolved
+				}
+			}
+
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Get(serverAddr + "/api/review?sha=" + sha)
+			if err != nil {
+				return fmt.Errorf("failed to connect to daemon (is it running?)")
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusNotFound {
+				return fmt.Errorf("no review found for commit %s", shortSHA(sha))
+			}
+
+			var review storage.Review
+			if err := json.NewDecoder(resp.Body).Decode(&review); err != nil {
+				return fmt.Errorf("failed to parse response: %w", err)
+			}
+
+			fmt.Printf("Review for %s (by %s)\n", shortSHA(sha), review.Agent)
+			fmt.Println(strings.Repeat("-", 60))
+			fmt.Println(review.Output)
+
+			return nil
+		},
+	}
+}
+
+func respondCmd() *cobra.Command {
+	var (
+		responder string
+		message   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "respond [sha]",
+		Short: "Add a response to a review",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sha := args[0]
+
+			// Resolve SHA
+			if root, err := git.GetRepoRoot("."); err == nil {
+				if resolved, err := git.ResolveSHA(root, sha); err == nil {
+					sha = resolved
+				}
+			}
+
+			// If no message provided, open editor
+			if message == "" {
+				editor := os.Getenv("EDITOR")
+				if editor == "" {
+					editor = "vim"
+				}
+
+				tmpfile, err := os.CreateTemp("", "roborev-response-*.md")
+				if err != nil {
+					return fmt.Errorf("create temp file: %w", err)
+				}
+				tmpfile.Close()
+				defer os.Remove(tmpfile.Name())
+
+				editorCmd := exec.Command(editor, tmpfile.Name())
+				editorCmd.Stdin = os.Stdin
+				editorCmd.Stdout = os.Stdout
+				editorCmd.Stderr = os.Stderr
+				if err := editorCmd.Run(); err != nil {
+					return fmt.Errorf("editor failed: %w", err)
+				}
+
+				content, err := os.ReadFile(tmpfile.Name())
+				if err != nil {
+					return fmt.Errorf("read response: %w", err)
+				}
+				message = strings.TrimSpace(string(content))
+			}
+
+			if message == "" {
+				return fmt.Errorf("empty response, aborting")
+			}
+
+			if responder == "" {
+				responder = os.Getenv("USER")
+				if responder == "" {
+					responder = "anonymous"
+				}
+			}
+
+			reqBody, _ := json.Marshal(map[string]string{
+				"sha":       sha,
+				"responder": responder,
+				"response":  message,
+			})
+
+			resp, err := http.Post(serverAddr+"/api/respond", "application/json", bytes.NewReader(reqBody))
+			if err != nil {
+				return fmt.Errorf("failed to connect to daemon: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusCreated {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("failed to add response: %s", body)
+			}
+
+			fmt.Println("Response added successfully")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&responder, "responder", "", "responder name (default: $USER)")
+	cmd.Flags().StringVarP(&message, "message", "m", "", "response message (opens editor if not provided)")
+
+	return cmd
+}
+
+func installHookCmd() *cobra.Command {
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "install-hook",
+		Short: "Install post-commit hook in current repository",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := git.GetRepoRoot(".")
+			if err != nil {
+				return fmt.Errorf("not a git repository: %w", err)
+			}
+
+			hookPath := filepath.Join(root, ".git", "hooks", "post-commit")
+
+			// Check if hook already exists
+			if _, err := os.Stat(hookPath); err == nil && !force {
+				return fmt.Errorf("hook already exists at %s (use --force to overwrite)", hookPath)
+			}
+
+			hookContent := `#!/bin/sh
+# RoboRev post-commit hook - auto-reviews every commit
+roborev enqueue --sha HEAD 2>/dev/null &
+`
+
+			if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+				return fmt.Errorf("write hook: %w", err)
+			}
+
+			fmt.Printf("Installed post-commit hook at %s\n", hookPath)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing hook")
+
+	return cmd
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}

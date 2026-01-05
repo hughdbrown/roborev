@@ -1,0 +1,60 @@
+package daemon
+
+import (
+	"os"
+	"testing"
+)
+
+func TestFindAvailablePort(t *testing.T) {
+	// Test finding an available port
+	addr, port, err := FindAvailablePort("127.0.0.1:7373")
+	if err != nil {
+		t.Fatalf("FindAvailablePort failed: %v", err)
+	}
+
+	if addr == "" {
+		t.Error("Expected non-empty address")
+	}
+	if port < 7373 {
+		t.Errorf("Expected port >= 7373, got %d", port)
+	}
+}
+
+func TestRuntimeInfoReadWrite(t *testing.T) {
+	// Use temp home directory
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Write runtime info
+	err := WriteRuntime("127.0.0.1:7373", 7373)
+	if err != nil {
+		t.Fatalf("WriteRuntime failed: %v", err)
+	}
+
+	// Read it back
+	info, err := ReadRuntime()
+	if err != nil {
+		t.Fatalf("ReadRuntime failed: %v", err)
+	}
+
+	if info.Addr != "127.0.0.1:7373" {
+		t.Errorf("Expected addr '127.0.0.1:7373', got '%s'", info.Addr)
+	}
+	if info.Port != 7373 {
+		t.Errorf("Expected port 7373, got %d", info.Port)
+	}
+	if info.PID == 0 {
+		t.Error("Expected non-zero PID")
+	}
+
+	// Remove it
+	RemoveRuntime()
+
+	// Should fail to read now
+	_, err = ReadRuntime()
+	if err == nil {
+		t.Error("Expected error after RemoveRuntime")
+	}
+}

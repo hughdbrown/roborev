@@ -1,0 +1,135 @@
+package git
+
+import (
+	"bytes"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+// CommitInfo holds metadata about a commit
+type CommitInfo struct {
+	SHA       string
+	Author    string
+	Subject   string
+	Timestamp time.Time
+}
+
+// GetCommitInfo retrieves commit metadata
+func GetCommitInfo(repoPath, sha string) (*CommitInfo, error) {
+	// Format: %H|%an|%s|%aI
+	cmd := exec.Command("git", "log", "-1", "--format=%H|%an|%s|%aI", sha)
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git log: %w", err)
+	}
+
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 4)
+	if len(parts) < 4 {
+		return nil, fmt.Errorf("unexpected git log output: %s", out)
+	}
+
+	ts, err := time.Parse(time.RFC3339, parts[3])
+	if err != nil {
+		ts = time.Now() // Fallback
+	}
+
+	return &CommitInfo{
+		SHA:       parts[0],
+		Author:    parts[1],
+		Subject:   parts[2],
+		Timestamp: ts,
+	}, nil
+}
+
+// GetDiff returns the full diff for a commit
+func GetDiff(repoPath, sha string) (string, error) {
+	cmd := exec.Command("git", "show", sha, "--format=")
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git show: %w", err)
+	}
+
+	return string(out), nil
+}
+
+// GetFilesChanged returns the list of files changed in a commit
+func GetFilesChanged(repoPath, sha string) ([]string, error) {
+	cmd := exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff-tree: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var files []string
+	for _, line := range lines {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+
+	return files, nil
+}
+
+// GetStat returns the stat summary for a commit
+func GetStat(repoPath, sha string) (string, error) {
+	cmd := exec.Command("git", "show", "--stat", sha, "--format=")
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git show --stat: %w", err)
+	}
+
+	return string(out), nil
+}
+
+// ResolveSHA resolves a ref (like HEAD) to a full SHA
+func ResolveSHA(repoPath, ref string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", ref)
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse: %w", err)
+	}
+
+	return strings.TrimSpace(string(out)), nil
+}
+
+// GetRepoRoot returns the root directory of the git repository
+func GetRepoRoot(path string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = path
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --show-toplevel: %w", err)
+	}
+
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ReadFile reads a file at a specific commit
+func ReadFile(repoPath, sha, filePath string) ([]byte, error) {
+	cmd := exec.Command("git", "show", fmt.Sprintf("%s:%s", sha, filePath))
+	cmd.Dir = repoPath
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("git show %s:%s: %s", sha, filePath, stderr.String())
+	}
+
+	return stdout.Bytes(), nil
+}

@@ -1,0 +1,28 @@
+# Binaries (in root directory only)
+/roborev
+/roborevd
+/roborev-tui
+*.exe
+/dist/
+
+# Generated protobuf (optional - can keep or ignore)
+proto/*.pb.go
+
+# Test/build artifacts
+*.out
+coverage.out
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config (users create their own)
+.roborev.toml

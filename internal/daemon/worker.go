@@ -1,0 +1,136 @@
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/user/roborev/internal/agent"
+	"github.com/user/roborev/internal/config"
+	"github.com/user/roborev/internal/prompt"
+	"github.com/user/roborev/internal/storage"
+)
+
+// WorkerPool manages a pool of review workers
+type WorkerPool struct {
+	db            *storage.DB
+	cfg           *config.Config
+	promptBuilder *prompt.Builder
+
+	numWorkers    int
+	activeWorkers atomic.Int32
+	stopCh        chan struct{}
+	wg            sync.WaitGroup
+}
+
+// NewWorkerPool creates a new worker pool
+func NewWorkerPool(db *storage.DB, cfg *config.Config, numWorkers int) *WorkerPool {
+	return &WorkerPool{
+		db:            db,
+		cfg:           cfg,
+		promptBuilder: prompt.NewBuilder(db),
+		numWorkers:    numWorkers,
+		stopCh:        make(chan struct{}),
+	}
+}
+
+// Start begins the worker pool
+func (wp *WorkerPool) Start() {
+	log.Printf("Starting worker pool with %d workers", wp.numWorkers)
+
+	for i := 0; i < wp.numWorkers; i++ {
+		wp.wg.Add(1)
+		go wp.worker(i)
+	}
+}
+
+// Stop gracefully shuts down the worker pool
+func (wp *WorkerPool) Stop() {
+	log.Println("Stopping worker pool...")
+	close(wp.stopCh)
+	wp.wg.Wait()
+	log.Println("Worker pool stopped")
+}
+
+// ActiveWorkers returns the number of currently active workers
+func (wp *WorkerPool) ActiveWorkers() int {
+	return int(wp.activeWorkers.Load())
+}
+
+func (wp *WorkerPool) worker(id int) {
+	defer wp.wg.Done()
+	workerID := fmt.Sprintf("worker-%d", id)
+
+	log.Printf("[%s] Started", workerID)
+
+	for {
+		select {
+		case <-wp.stopCh:
+			log.Printf("[%s] Shutting down", workerID)
+			return
+		default:
+		}
+
+		// Try to claim a job
+		job, err := wp.db.ClaimJob(workerID)
+		if err != nil {
+			log.Printf("[%s] Error claiming job: %v", workerID, err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if job == nil {
+			// No jobs available, wait and retry
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Process the job
+		wp.activeWorkers.Add(1)
+		wp.processJob(workerID, job)
+		wp.activeWorkers.Add(-1)
+	}
+}
+
+func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
+	log.Printf("[%s] Processing job %d for commit %s in %s", workerID, job.ID, job.CommitSHA, job.RepoName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Build the prompt
+	reviewPrompt, err := wp.promptBuilder.Build(job.RepoPath, job.CommitSHA, job.RepoID, wp.cfg.ReviewContextCount)
+	if err != nil {
+		log.Printf("[%s] Error building prompt: %v", workerID, err)
+		wp.db.FailJob(job.ID, fmt.Sprintf("build prompt: %v", err))
+		return
+	}
+
+	// Get the agent
+	a, err := agent.Get(job.Agent)
+	if err != nil {
+		log.Printf("[%s] Error getting agent %s: %v", workerID, job.Agent, err)
+		wp.db.FailJob(job.ID, fmt.Sprintf("get agent: %v", err))
+		return
+	}
+
+	// Run the review
+	log.Printf("[%s] Running %s review...", workerID, job.Agent)
+	output, err := a.Review(ctx, job.RepoPath, job.CommitSHA, reviewPrompt)
+	if err != nil {
+		log.Printf("[%s] Agent error: %v", workerID, err)
+		wp.db.FailJob(job.ID, fmt.Sprintf("agent: %v", err))
+		return
+	}
+
+	// Store the result
+	if err := wp.db.CompleteJob(job.ID, job.Agent, reviewPrompt, output); err != nil {
+		log.Printf("[%s] Error storing review: %v", workerID, err)
+		return
+	}
+
+	log.Printf("[%s] Completed job %d", workerID, job.ID)
+}
