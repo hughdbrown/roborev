@@ -46,17 +46,18 @@ const (
 )
 
 type tuiModel struct {
-	serverAddr    string
-	jobs          []storage.ReviewJob
-	status        storage.DaemonStatus
-	selectedIdx   int
-	currentView   tuiView
-	currentReview *storage.Review
-	reviewScroll  int
-	promptScroll  int
-	width         int
-	height        int
-	err           error
+	serverAddr      string
+	jobs            []storage.ReviewJob
+	status          storage.DaemonStatus
+	selectedIdx     int
+	currentView     tuiView
+	currentReview   *storage.Review
+	reviewScroll    int
+	promptScroll    int
+	promptFromQueue bool // true if prompt view was entered from queue (not review)
+	width           int
+	height          int
+	err             error
 }
 
 type tuiTickMsg time.Time
@@ -177,13 +178,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.currentView == tuiViewPrompt {
-				// If we have a review output, go back to review; otherwise go to queue
-				if m.currentReview != nil && m.currentReview.Output != "" {
-					m.currentView = tuiViewReview
-					m.promptScroll = 0
-				} else {
+				// Go back to where we came from
+				if m.promptFromQueue {
 					m.currentView = tuiViewQueue
 					m.currentReview = nil
+					m.promptScroll = 0
+				} else {
+					m.currentView = tuiViewReview
 					m.promptScroll = 0
 				}
 				return m, nil
@@ -239,6 +240,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				job := m.jobs[m.selectedIdx]
 				if job.Status == storage.JobStatusDone {
 					// Fetch review and go directly to prompt view
+					m.promptFromQueue = true
 					return m, m.fetchReviewForPrompt(job.ID)
 				} else if job.Status == storage.JobStatusRunning && job.Prompt != "" {
 					// Show prompt from job directly for running jobs
@@ -249,14 +251,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.currentView = tuiViewPrompt
 					m.promptScroll = 0
+					m.promptFromQueue = true
 					return m, nil
 				}
 			} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
 				m.currentView = tuiViewPrompt
 				m.promptScroll = 0
+				m.promptFromQueue = false
 			} else if m.currentView == tuiViewPrompt {
-				m.currentView = tuiViewReview
-				m.promptScroll = 0
+				// Toggle back: go to review if came from review, queue if came from queue
+				if m.promptFromQueue {
+					m.currentView = tuiViewQueue
+					m.currentReview = nil
+					m.promptScroll = 0
+				} else {
+					m.currentView = tuiViewReview
+					m.promptScroll = 0
+				}
 			}
 
 		case "esc":
@@ -265,13 +276,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentReview = nil
 				m.reviewScroll = 0
 			} else if m.currentView == tuiViewPrompt {
-				// If we have a review output, go back to review; otherwise go to queue
-				if m.currentReview != nil && m.currentReview.Output != "" {
-					m.currentView = tuiViewReview
-					m.promptScroll = 0
-				} else {
+				// Go back to where we came from
+				if m.promptFromQueue {
 					m.currentView = tuiViewQueue
 					m.currentReview = nil
+					m.promptScroll = 0
+				} else {
+					m.currentView = tuiViewReview
 					m.promptScroll = 0
 				}
 			}
