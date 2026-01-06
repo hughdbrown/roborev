@@ -133,25 +133,63 @@ func startDaemon() error {
 	return fmt.Errorf("daemon failed to start")
 }
 
-// restartDaemon stops the running daemon and starts a new one
-func restartDaemon() error {
-	if runtime.GOOS == "windows" {
-		exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
+// stopDaemon stops the running daemon using PID from daemon.json
+func stopDaemon() error {
+	info, err := daemon.ReadRuntime()
+	if err == nil && info.PID > 0 {
+		// Kill by specific PID
+		if runtime.GOOS == "windows" {
+			exec.Command("taskkill", "/PID", fmt.Sprintf("%d", info.PID), "/F").Run()
+		} else {
+			// Send SIGTERM first for graceful shutdown
+			exec.Command("kill", "-TERM", fmt.Sprintf("%d", info.PID)).Run()
+			time.Sleep(500 * time.Millisecond)
+			// Then SIGKILL to ensure it's dead
+			exec.Command("kill", "-KILL", fmt.Sprintf("%d", info.PID)).Run()
+		}
+		// Clean up runtime file
+		daemon.RemoveRuntime()
 	} else {
-		// Send SIGTERM first for graceful shutdown
-		exec.Command("pkill", "-TERM", "-f", "roborevd").Run()
-		time.Sleep(500 * time.Millisecond)
-		// Then SIGKILL to ensure it's dead
-		exec.Command("pkill", "-KILL", "-f", "roborevd").Run()
+		// Fallback to pkill if no PID file (shouldn't happen normally)
+		if runtime.GOOS == "windows" {
+			exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
+		} else {
+			exec.Command("pkill", "-TERM", "-x", "roborevd").Run()
+			time.Sleep(500 * time.Millisecond)
+			exec.Command("pkill", "-KILL", "-x", "roborevd").Run()
+		}
 	}
 	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// restartDaemon stops the running daemon and starts a new one
+func restartDaemon() error {
+	stopDaemon()
 
 	// Checkpoint WAL to ensure clean state for new daemon
+	// Retry a few times in case daemon hasn't fully released the DB
 	if dbPath := storage.DefaultDBPath(); dbPath != "" {
-		db, err := storage.Open(dbPath)
-		if err == nil {
-			db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		var lastErr error
+		for i := 0; i < 3; i++ {
+			db, err := storage.Open(dbPath)
+			if err != nil {
+				lastErr = err
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+				lastErr = err
+				db.Close()
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
 			db.Close()
+			lastErr = nil
+			break
+		}
+		if lastErr != nil && verbose {
+			fmt.Printf("Warning: WAL checkpoint failed: %v\n", lastErr)
 		}
 	}
 
@@ -282,12 +320,7 @@ func daemonCmd() *cobra.Command {
 		Use:   "stop",
 		Short: "Stop the daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Send shutdown request or kill process
-			if runtime.GOOS == "windows" {
-				exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
-			} else {
-				exec.Command("pkill", "-f", "roborevd").Run()
-			}
+			stopDaemon()
 			fmt.Println("Daemon stopped")
 			return nil
 		},
@@ -297,12 +330,7 @@ func daemonCmd() *cobra.Command {
 		Use:   "restart",
 		Short: "Restart the daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS == "windows" {
-				exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
-			} else {
-				exec.Command("pkill", "-f", "roborevd").Run()
-			}
-			time.Sleep(500 * time.Millisecond)
+			stopDaemon()
 			if err := ensureDaemon(); err != nil {
 				return err
 			}
