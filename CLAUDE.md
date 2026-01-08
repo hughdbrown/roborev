@@ -79,3 +79,4 @@ CLI reads this to find the daemon. If port 7373 is busy, daemon auto-increments.
 - Prefer stdlib over external dependencies
 - Tests should be fast and isolated
 - No emojis in code or output (except commit messages)
+- Never amend commits; always create new commits for fixes

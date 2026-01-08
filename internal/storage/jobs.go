@@ -131,7 +131,8 @@ func (db *DB) SaveJobPrompt(jobID int64, prompt string) error {
 	return err
 }
 
-// CompleteJob marks a job as done and stores the review
+// CompleteJob marks a job as done and stores the review.
+// Only updates if job is still in 'running' state (respects cancellation).
 func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -141,10 +142,20 @@ func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 
 	now := time.Now().Format(time.RFC3339)
 
-	// Update job status
-	_, err = tx.Exec(`UPDATE review_jobs SET status = 'done', finished_at = ? WHERE id = ?`, now, jobID)
+	// Update job status only if still running (not canceled)
+	result, err := tx.Exec(`UPDATE review_jobs SET status = 'done', finished_at = ? WHERE id = ? AND status = 'running'`, now, jobID)
 	if err != nil {
 		return err
+	}
+
+	// Check if we actually updated (job wasn't canceled)
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		// Job was canceled or in unexpected state, don't store review
+		return nil
 	}
 
 	// Insert review
@@ -157,10 +168,11 @@ func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 	return tx.Commit()
 }
 
-// FailJob marks a job as failed with an error message
+// FailJob marks a job as failed with an error message.
+// Only updates if job is still in 'running' state (respects cancellation).
 func (db *DB) FailJob(jobID int64, errorMsg string) error {
 	now := time.Now().Format(time.RFC3339)
-	_, err := db.Exec(`UPDATE review_jobs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?`,
+	_, err := db.Exec(`UPDATE review_jobs SET status = 'failed', finished_at = ?, error = ? WHERE id = ? AND status = 'running'`,
 		now, errorMsg, jobID)
 	return err
 }
