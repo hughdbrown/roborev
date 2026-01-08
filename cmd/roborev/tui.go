@@ -362,6 +362,16 @@ func (m *tuiModel) setJobStatus(jobID int64, status storage.JobStatus) {
 	}
 }
 
+// setJobFinishedAt updates the FinishedAt for a job by ID
+func (m *tuiModel) setJobFinishedAt(jobID int64, finishedAt *time.Time) {
+	for i := range m.jobs {
+		if m.jobs[i].ID == jobID {
+			m.jobs[i].FinishedAt = finishedAt
+			return
+		}
+	}
+}
+
 // cancelJob sends a cancel request to the server
 func (m tuiModel) cancelJob(jobID int64, oldStatus storage.JobStatus, oldFinishedAt *time.Time) tea.Cmd {
 	return func() tea.Msg {
@@ -646,13 +656,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiCancelResultMsg:
 		if msg.err != nil {
 			// Rollback optimistic update on error (both status and finishedAt)
-			for i := range m.jobs {
-				if m.jobs[i].ID == msg.jobID {
-					m.jobs[i].Status = msg.oldState
-					m.jobs[i].FinishedAt = msg.oldFinishedAt
-					break
-				}
-			}
+			m.setJobStatus(msg.jobID, msg.oldState)
+			m.setJobFinishedAt(msg.jobID, msg.oldFinishedAt)
 			m.err = msg.err
 		}
 

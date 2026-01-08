@@ -859,6 +859,49 @@ func TestTUICancelRollbackOnError(t *testing.T) {
 	}
 }
 
+func TestTUICancelRollbackWithNonNilFinishedAt(t *testing.T) {
+	// Test rollback when original FinishedAt is non-nil (edge case: corrupted state
+	// or queued job that somehow has a timestamp)
+	m := newTuiModel("http://localhost")
+
+	// Setup: job with an existing FinishedAt (unusual but possible edge case)
+	startTime := time.Now().Add(-5 * time.Minute)
+	originalFinished := time.Now().Add(-2 * time.Minute)
+	m.jobs = []storage.ReviewJob{
+		{ID: 42, Status: storage.JobStatusQueued, StartedAt: &startTime, FinishedAt: &originalFinished},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 42
+
+	// Simulate the optimistic update that would have happened
+	now := time.Now()
+	m.jobs[0].Status = storage.JobStatusCanceled
+	m.jobs[0].FinishedAt = &now
+
+	// Simulate cancel error result - should rollback to original FinishedAt
+	errResult := tuiCancelResultMsg{
+		jobID:         42,
+		oldState:      storage.JobStatusQueued,
+		oldFinishedAt: &originalFinished, // Was non-nil before optimistic update
+		err:           fmt.Errorf("server error"),
+	}
+
+	updated, _ := m.Update(errResult)
+	m2 := updated.(tuiModel)
+
+	if m2.jobs[0].Status != storage.JobStatusQueued {
+		t.Errorf("Expected status to rollback to 'queued', got '%s'", m2.jobs[0].Status)
+	}
+	if m2.jobs[0].FinishedAt == nil {
+		t.Error("Expected FinishedAt to rollback to original non-nil value, got nil")
+	} else if !m2.jobs[0].FinishedAt.Equal(originalFinished) {
+		t.Errorf("Expected FinishedAt to rollback to %v, got %v", originalFinished, *m2.jobs[0].FinishedAt)
+	}
+	if m2.err == nil {
+		t.Error("Expected error to be set")
+	}
+}
+
 func TestTUICancelOptimisticUpdate(t *testing.T) {
 	m := newTuiModel("http://localhost")
 
