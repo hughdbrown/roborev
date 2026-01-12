@@ -238,7 +238,7 @@ func TestUninstallHookCmd(t *testing.T) {
 	})
 
 	t.Run("hook with roborev only - removes file", func(t *testing.T) {
-		hookContent := "#!/bin/bash\n# RoboRev auto-commit hook\nroborev enqueue\n"
+		hookContent := "#!/bin/bash\n# roborev auto-commit hook\nroborev enqueue\n"
 		repoPath, hookPath := setupRepo(t, hookContent)
 
 		origDir, _ := os.Getwd()
@@ -467,8 +467,8 @@ func TestGenerateHookContent(t *testing.T) {
 	})
 
 	t.Run("has roborev comment", func(t *testing.T) {
-		if !strings.Contains(content, "# RoboRev") {
-			t.Error("hook should contain RoboRev comment for detection")
+		if !strings.Contains(content, "# roborev") {
+			t.Error("hook should contain roborev comment for detection")
 		}
 	})
 

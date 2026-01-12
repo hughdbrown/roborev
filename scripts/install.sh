@@ -1,5 +1,5 @@
 #!/bin/bash
-# RoboRev installer
+# roborev installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/wesm/roborev/main/scripts/install.sh | bash
 
 set -e

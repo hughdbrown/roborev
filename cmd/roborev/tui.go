@@ -1394,7 +1394,7 @@ func (m tuiModel) renderQueueView() string {
 	var b strings.Builder
 
 	// Title with version, optional update notification, and filter indicators
-	title := fmt.Sprintf("RoboRev Queue (%s)", version.Version)
+	title := fmt.Sprintf("roborev queue (%s)", version.Version)
 	if m.activeRepoFilter != "" {
 		title += fmt.Sprintf(" [f: %s]", filepath.Base(m.activeRepoFilter))
 	}

@@ -37,7 +37,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "roborev",
 		Short: "Automatic code review for git commits",
-		Long:  "RoboRev automatically reviews git commits using AI agents (Codex, Claude Code, Gemini, Copilot, OpenCode)",
+		Long:  "roborev automatically reviews git commits using AI agents (Codex, Claude Code, Gemini, Copilot, OpenCode)",
 	}
 
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "http://127.0.0.1:7373", "daemon server address")
@@ -268,7 +268,7 @@ func initCmd() *cobra.Command {
 			repoConfigPath := filepath.Join(root, ".roborev.toml")
 			if agent != "" {
 				if _, err := os.Stat(repoConfigPath); os.IsNotExist(err) {
-					repoConfig := fmt.Sprintf("# RoboRev per-repo configuration\nagent = %q\n", agent)
+					repoConfig := fmt.Sprintf("# roborev per-repo configuration\nagent = %q\n", agent)
 					if err := os.WriteFile(repoConfigPath, []byte(repoConfig), 0644); err != nil {
 						return fmt.Errorf("create repo config: %w", err)
 					}
@@ -1110,7 +1110,7 @@ func generateHookContent() string {
 
 	// Prefer baked path (security), fall back to PATH only if baked is missing
 	return fmt.Sprintf(`#!/bin/sh
-# RoboRev post-commit hook - auto-reviews every commit
+# roborev post-commit hook - auto-reviews every commit
 ROBOREV=%q
 if [ ! -x "$ROBOREV" ]; then
     ROBOREV=$(command -v roborev 2>/dev/null)
