@@ -224,9 +224,33 @@ func stopDaemon() error {
 	return nil
 }
 
+// killAllDaemons kills any roborev daemon processes that might be running
+// This handles orphaned processes from old binaries or crashed restarts
+func killAllDaemons() {
+	if runtime.GOOS == "windows" {
+		// On Windows, use wmic to kill roborev.exe processes except our own PID
+		// taskkill /IM would kill the CLI itself, so we filter by PID
+		myPID := os.Getpid()
+		// Use wmic to find and kill daemon processes, excluding our PID
+		exec.Command("wmic", "process", "where",
+			fmt.Sprintf("name='roborev.exe' and processid!=%d", myPID),
+			"call", "terminate").Run()
+	} else {
+		// On Unix, use pkill to kill all roborev daemon processes
+		// Use -f to match against full command line
+		exec.Command("pkill", "-f", "roborev daemon run").Run()
+		time.Sleep(100 * time.Millisecond)
+		// Force kill any remaining
+		exec.Command("pkill", "-9", "-f", "roborev daemon run").Run()
+	}
+	time.Sleep(200 * time.Millisecond)
+}
+
 // restartDaemon stops the running daemon and starts a new one
 func restartDaemon() error {
-	stopDaemon()
+	_ = stopDaemon() // Ignore error - killAllDaemons is the fallback
+	// Also kill any orphaned daemon processes from old binaries
+	killAllDaemons()
 
 	// Checkpoint WAL to ensure clean state for new daemon
 	// Retry a few times in case daemon hasn't fully released the DB

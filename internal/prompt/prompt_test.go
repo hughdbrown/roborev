@@ -188,6 +188,84 @@ func TestBuildPromptWithPreviousReviews(t *testing.T) {
 	}
 }
 
+func TestBuildPromptWithPreviousReviewsAndResponses(t *testing.T) {
+	repoPath, commits := setupTestRepo(t)
+
+	// Setup test database
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	// Create repo
+	repo, err := db.GetOrCreateRepo(repoPath)
+	if err != nil {
+		t.Fatalf("GetOrCreateRepo failed: %v", err)
+	}
+
+	// Create review for commit 3 (parent of commit 6) with responses
+	parentSHA := commits[2] // commit 3
+	commit3, _ := db.GetOrCreateCommit(repo.ID, parentSHA, "Test", "commit 3", time.Now())
+	job, _ := db.EnqueueJob(repo.ID, commit3.ID, parentSHA, "test", "")
+	db.ClaimJob("test-worker")
+	db.CompleteJob(job.ID, "test", "prompt", "Found potential memory leak in connection pool")
+
+	// Add responses to the previous review
+	_, err = db.AddResponseToJob(job.ID, "alice", "Known issue, will fix in next sprint")
+	if err != nil {
+		t.Fatalf("AddResponseToJob failed: %v", err)
+	}
+	_, err = db.AddResponseToJob(job.ID, "bob", "Added to tech debt backlog")
+	if err != nil {
+		t.Fatalf("AddResponseToJob failed: %v", err)
+	}
+
+	// Also add commits 4 and 5 to DB
+	for _, sha := range commits[3:5] {
+		db.GetOrCreateCommit(repo.ID, sha, "Test", "commit", time.Now())
+	}
+
+	// Build prompt for commit 6 with context from previous 5 commits
+	builder := NewBuilder(db)
+	prompt, err := builder.Build(repoPath, commits[5], repo.ID, 5)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should contain previous reviews section
+	if !strings.Contains(prompt, "## Previous Reviews") {
+		t.Error("Prompt should contain previous reviews section")
+	}
+
+	// Should contain the review text
+	if !strings.Contains(prompt, "memory leak in connection pool") {
+		t.Error("Prompt should contain the previous review text")
+	}
+
+	// Should contain responses to the previous review
+	if !strings.Contains(prompt, "Responses to this review:") {
+		t.Error("Prompt should contain responses section for previous review")
+	}
+
+	if !strings.Contains(prompt, "alice") {
+		t.Error("Prompt should contain responder 'alice'")
+	}
+
+	if !strings.Contains(prompt, "Known issue, will fix in next sprint") {
+		t.Error("Prompt should contain alice's response text")
+	}
+
+	if !strings.Contains(prompt, "bob") {
+		t.Error("Prompt should contain responder 'bob'")
+	}
+
+	if !strings.Contains(prompt, "Added to tech debt backlog") {
+		t.Error("Prompt should contain bob's response text")
+	}
+}
+
 func TestBuildPromptWithNoParentCommits(t *testing.T) {
 	// Create a repo with just one commit
 	tmpDir := t.TempDir()
@@ -414,5 +492,133 @@ func TestBuildPromptGuidelinesOrder(t *testing.T) {
 
 	if guidelinesPos > currentCommitPos {
 		t.Error("Guidelines should come before current commit section")
+	}
+}
+
+func TestBuildPromptWithPreviousAttempts(t *testing.T) {
+	repoPath, commits := setupTestRepo(t)
+	targetSHA := commits[5] // Last commit
+
+	// Setup test database
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	// Create repo and commit in DB
+	repo, err := db.GetOrCreateRepo(repoPath)
+	if err != nil {
+		t.Fatalf("GetOrCreateRepo failed: %v", err)
+	}
+
+	commit, err := db.GetOrCreateCommit(repo.ID, targetSHA, "Test", "commit message", time.Now())
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit failed: %v", err)
+	}
+
+	// Create two previous reviews for the SAME commit (simulating re-reviews)
+	reviewTexts := []string{
+		"First review: Found missing error handling",
+		"Second review: Still missing error handling, also found SQL injection",
+	}
+
+	for _, reviewText := range reviewTexts {
+		job, err := db.EnqueueJob(repo.ID, commit.ID, targetSHA, "test", "")
+		if err != nil {
+			t.Fatalf("EnqueueJob failed: %v", err)
+		}
+		_, err = db.ClaimJob("test-worker")
+		if err != nil {
+			t.Fatalf("ClaimJob failed: %v", err)
+		}
+		err = db.CompleteJob(job.ID, "test", "test prompt", reviewText)
+		if err != nil {
+			t.Fatalf("CompleteJob failed: %v", err)
+		}
+	}
+
+	// Build prompt - should include previous attempts for the same commit
+	builder := NewBuilder(db)
+	prompt, err := builder.Build(repoPath, targetSHA, repo.ID, 0)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should contain previous review attempts section
+	if !strings.Contains(prompt, "## Previous Review Attempts") {
+		t.Error("Prompt should contain previous review attempts section")
+	}
+
+	// Should contain both review texts
+	for _, reviewText := range reviewTexts {
+		if !strings.Contains(prompt, reviewText) {
+			t.Errorf("Prompt should contain review text: %s", reviewText)
+		}
+	}
+
+	// Should contain attempt numbers
+	if !strings.Contains(prompt, "Review Attempt 1") {
+		t.Error("Prompt should contain 'Review Attempt 1'")
+	}
+	if !strings.Contains(prompt, "Review Attempt 2") {
+		t.Error("Prompt should contain 'Review Attempt 2'")
+	}
+}
+
+func TestBuildPromptWithPreviousAttemptsAndResponses(t *testing.T) {
+	repoPath, commits := setupTestRepo(t)
+	targetSHA := commits[5]
+
+	// Setup test database
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	repo, _ := db.GetOrCreateRepo(repoPath)
+	commit, _ := db.GetOrCreateCommit(repo.ID, targetSHA, "Test", "test", time.Now())
+
+	// Create a previous review
+	job, _ := db.EnqueueJob(repo.ID, commit.ID, targetSHA, "test", "")
+	db.ClaimJob("test-worker")
+	db.CompleteJob(job.ID, "test", "prompt", "Found issue: missing null check")
+
+	// Add a response to the previous review
+	_, err = db.AddResponseToJob(job.ID, "developer", "This is intentional, the value is never null here")
+	if err != nil {
+		t.Fatalf("AddResponseToJob failed: %v", err)
+	}
+
+	// Build prompt for a new review of the same commit
+	builder := NewBuilder(db)
+	prompt, err := builder.Build(repoPath, targetSHA, repo.ID, 0)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should contain the previous review
+	if !strings.Contains(prompt, "## Previous Review Attempts") {
+		t.Error("Prompt should contain previous review attempts section")
+	}
+
+	if !strings.Contains(prompt, "missing null check") {
+		t.Error("Prompt should contain the previous review text")
+	}
+
+	// Should contain the response
+	if !strings.Contains(prompt, "Responses to this review:") {
+		t.Error("Prompt should contain responses section")
+	}
+
+	if !strings.Contains(prompt, "This is intentional") {
+		t.Error("Prompt should contain the response text")
+	}
+
+	if !strings.Contains(prompt, "developer") {
+		t.Error("Prompt should contain the responder name")
 	}
 }
