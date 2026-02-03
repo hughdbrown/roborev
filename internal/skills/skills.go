@@ -3,12 +3,15 @@
 package skills
 
 import (
+	"bufio"
+	"bytes"
 	"embed"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 //go:embed claude/*/SKILL.md
@@ -70,12 +73,14 @@ func IsInstalled(agent Agent) bool {
 		checkFiles = []string{
 			filepath.Join(skillsDir, "roborev-address", "SKILL.md"),
 			filepath.Join(skillsDir, "roborev-respond", "SKILL.md"),
+			filepath.Join(skillsDir, "roborev-fix", "SKILL.md"),
 		}
 	case AgentCodex:
 		skillsDir := filepath.Join(home, ".codex", "skills")
 		checkFiles = []string{
 			filepath.Join(skillsDir, "roborev-address", "SKILL.md"),
 			filepath.Join(skillsDir, "roborev-respond", "SKILL.md"),
+			filepath.Join(skillsDir, "roborev-fix", "SKILL.md"),
 		}
 	default:
 		return false
@@ -237,6 +242,145 @@ func installCodex() (InstallResult, error) {
 	}
 
 	return result, nil
+}
+
+// SkillInfo describes an available skill.
+type SkillInfo struct {
+	DirName     string // e.g. "roborev-address"
+	Name        string // e.g. "roborev:address"
+	Description string
+}
+
+// SkillState describes whether a skill is installed and up to date for an agent.
+type SkillState int
+
+const (
+	SkillMissing  SkillState = iota // Not installed
+	SkillCurrent                    // Installed and matches embedded version
+	SkillOutdated                   // Installed but content differs from embedded
+)
+
+// AgentStatus describes the installation state for a single agent.
+type AgentStatus struct {
+	Agent     Agent
+	Available bool                  // Whether the agent config dir exists
+	Skills    map[string]SkillState // keyed by dir name (e.g. "roborev-address")
+}
+
+// ListSkills returns metadata for all embedded skills (from the Claude skill set).
+func ListSkills() ([]SkillInfo, error) {
+	entries, err := fs.ReadDir(claudeSkills, "claude")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded skills: %w", err)
+	}
+
+	var out []SkillInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		content, err := claudeSkills.ReadFile(path.Join("claude", entry.Name(), "SKILL.md"))
+		if err != nil {
+			return nil, fmt.Errorf("read %s/SKILL.md: %w", entry.Name(), err)
+		}
+		name, desc := parseFrontmatter(content)
+		if name == "" {
+			name = strings.Replace(entry.Name(), "roborev-", "roborev:", 1)
+		}
+		out = append(out, SkillInfo{DirName: entry.Name(), Name: name, Description: desc})
+	}
+	return out, nil
+}
+
+// Status returns per-agent, per-skill installation state.
+func Status() []AgentStatus {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+
+	type agentDef struct {
+		agent    Agent
+		configDir string
+		embedFS  embed.FS
+		embedDir string
+	}
+
+	agents := []agentDef{
+		{AgentClaude, filepath.Join(home, ".claude"), claudeSkills, "claude"},
+		{AgentCodex, filepath.Join(home, ".codex"), codexSkills, "codex"},
+	}
+
+	var out []AgentStatus
+	for _, a := range agents {
+		status := AgentStatus{
+			Agent:  a.agent,
+			Skills: make(map[string]SkillState),
+		}
+
+		if _, err := os.Stat(a.configDir); err != nil {
+			out = append(out, status)
+			continue
+		}
+		status.Available = true
+
+		entries, err := fs.ReadDir(a.embedFS, a.embedDir)
+		if err != nil {
+			out = append(out, status)
+			continue
+		}
+
+		skillsDir := filepath.Join(a.configDir, "skills")
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			installedPath := filepath.Join(skillsDir, name, "SKILL.md")
+
+			installedContent, err := os.ReadFile(installedPath)
+			if err != nil {
+				status.Skills[name] = SkillMissing
+				continue
+			}
+
+			embeddedContent, err := a.embedFS.ReadFile(path.Join(a.embedDir, name, "SKILL.md"))
+			if err != nil {
+				status.Skills[name] = SkillMissing
+				continue
+			}
+
+			if bytes.Equal(installedContent, embeddedContent) {
+				status.Skills[name] = SkillCurrent
+			} else {
+				status.Skills[name] = SkillOutdated
+			}
+		}
+
+		out = append(out, status)
+	}
+	return out
+}
+
+// parseFrontmatter extracts name and description from YAML frontmatter.
+func parseFrontmatter(data []byte) (name, description string) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+	if !scanner.Scan() || strings.TrimSpace(scanner.Text()) != "---" {
+		return "", ""
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "---" {
+			break
+		}
+		if strings.HasPrefix(line, "name:") {
+			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		} else if strings.HasPrefix(line, "description:") {
+			description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+		}
+	}
+	return name, description
 }
 
 func fileExists(path string) bool {
