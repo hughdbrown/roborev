@@ -569,16 +569,10 @@ func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "#") {
-			if len(line) > 80 {
-				return line[:77] + "..."
-			}
-			return line
+			return truncateString(line, 80)
 		}
 	}
-	if len(s) > 80 {
-		return s[:77] + "..."
-	}
-	return s
+	return truncateString(s, 80)
 }
 
 func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOptions) error {
