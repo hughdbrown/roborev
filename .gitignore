@@ -2,6 +2,7 @@
 /roborev
 *.exe
 /dist/
+bin/
 
 # Generated protobuf (optional - can keep or ignore)
 proto/*.pb.go
