@@ -466,7 +466,7 @@ func queryUnaddressedJobs(repoRoot, branch string) ([]int64, error) {
 	return jobIDs, nil
 }
 
-// runFixList prints unaddressed jobs in a parseable format without running any agent.
+// runFixList prints unaddressed jobs with detailed information without running any agent.
 func runFixList(cmd *cobra.Command, branch string, newestFirst bool) error {
 	if err := ensureDaemon(); err != nil {
 		return err
@@ -502,6 +502,8 @@ func runFixList(cmd *cobra.Command, branch string, newestFirst bool) error {
 		ctx = context.Background()
 	}
 
+	cmd.Printf("Found %d unaddressed fix(es):\n\n", len(jobIDs))
+
 	for _, id := range jobIDs {
 		job, err := fetchJob(ctx, serverAddr, id)
 		if err != nil {
@@ -513,11 +515,53 @@ func runFixList(cmd *cobra.Command, branch string, newestFirst bool) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not fetch review for job %d: %v\n", id, err)
 			continue
 		}
+
+		// Format the output with all available information
+		cmd.Printf("Job #%d\n", id)
+		cmd.Printf("  Git Ref:  %s\n", shortSHA(job.GitRef))
+		if job.Branch != "" {
+			cmd.Printf("  Branch:   %s\n", job.Branch)
+		}
+		if job.CommitSubject != "" {
+			cmd.Printf("  Subject:  %s\n", truncateString(job.CommitSubject, 60))
+		}
+		cmd.Printf("  Agent:    %s\n", job.Agent)
+		if job.Model != "" {
+			cmd.Printf("  Model:    %s\n", job.Model)
+		}
+		if job.FinishedAt != nil {
+			cmd.Printf("  Finished: %s\n", job.FinishedAt.Local().Format("2006-01-02 15:04:05"))
+		}
+		if job.Verdict != nil && *job.Verdict != "" {
+			cmd.Printf("  Verdict:  %s\n", *job.Verdict)
+		}
 		summary := firstLine(review.Output)
-		cmd.Printf("job %d  %s  %s  %q\n", id, shortSHA(job.GitRef), job.Agent, summary)
+		if summary != "" {
+			cmd.Printf("  Summary:  %s\n", summary)
+		}
+		cmd.Println()
 	}
 
+	cmd.Printf("To apply a fix: roborev fix <job_id>\n")
+	cmd.Printf("To apply all:   roborev fix --unaddressed\n")
+
 	return nil
+}
+
+// truncateString truncates s to maxLen characters, adding "..." if truncated.
+// It operates on Unicode runes to avoid cutting multi-byte characters.
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen])
+	}
+	return string(runes[:maxLen-3]) + "..."
 }
 
 // firstLine returns the first non-empty line of s, truncated to 80 chars.
@@ -525,16 +569,10 @@ func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "#") {
-			if len(line) > 80 {
-				return line[:77] + "..."
-			}
-			return line
+			return truncateString(line, 80)
 		}
 	}
-	if len(s) > 80 {
-		return s[:77] + "..."
-	}
-	return s
+	return truncateString(s, 80)
 }
 
 func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOptions) error {
