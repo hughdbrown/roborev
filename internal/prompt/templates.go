@@ -13,7 +13,7 @@ var templateFS embed.FS
 // GetSystemPrompt returns the system prompt for the specified agent and type.
 // If a specific template exists for the agent, it uses that.
 // Otherwise, it falls back to the default constant.
-// Supported prompt types: review, range, dirty, address, run, security
+// Supported prompt types: review, range, dirty, address, design-review, run, security
 func GetSystemPrompt(agentName string, promptType string) string {
 	// Normalize agent name
 	agentName = strings.ToLower(agentName)
@@ -48,6 +48,8 @@ func GetSystemPrompt(agentName string, promptType string) string {
 		base = SystemPromptAddress
 	case "security":
 		base = SystemPromptSecurity
+	case "design-review":
+		base = SystemPromptDesignReview
 	case "run":
 		// No default run preamble - return empty so raw prompts are used
 		return ""
