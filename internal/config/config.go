@@ -61,6 +61,14 @@ type Config struct {
 	SecurityModelFast     string `toml:"security_model_fast"`
 	SecurityModelStandard string `toml:"security_model_standard"`
 	SecurityModelThorough string `toml:"security_model_thorough"`
+	DesignAgent           string `toml:"design_agent"`
+	DesignAgentFast       string `toml:"design_agent_fast"`
+	DesignAgentStandard   string `toml:"design_agent_standard"`
+	DesignAgentThorough   string `toml:"design_agent_thorough"`
+	DesignModel           string `toml:"design_model"`
+	DesignModelFast       string `toml:"design_model_fast"`
+	DesignModelStandard   string `toml:"design_model_standard"`
+	DesignModelThorough   string `toml:"design_model_thorough"`
 	AllowUnsafeAgents     *bool  `toml:"allow_unsafe_agents"` // nil = not set, allows commands to choose their own default
 
 	// Agent commands
@@ -354,6 +362,14 @@ type RepoConfig struct {
 	SecurityModelFast     string `toml:"security_model_fast"`
 	SecurityModelStandard string `toml:"security_model_standard"`
 	SecurityModelThorough string `toml:"security_model_thorough"`
+	DesignAgent           string `toml:"design_agent"`
+	DesignAgentFast       string `toml:"design_agent_fast"`
+	DesignAgentStandard   string `toml:"design_agent_standard"`
+	DesignAgentThorough   string `toml:"design_agent_thorough"`
+	DesignModel           string `toml:"design_model"`
+	DesignModelFast       string `toml:"design_model_fast"`
+	DesignModelStandard   string `toml:"design_model_standard"`
+	DesignModelThorough   string `toml:"design_model_thorough"`
 
 	// Hooks configuration (per-repo)
 	Hooks []HookConfig `toml:"hooks"`
@@ -716,6 +732,14 @@ func repoWorkflowField(r *RepoConfig, workflow, level string, isAgent bool) stri
 			v = r.SecurityAgentThorough
 		case "security_":
 			v = r.SecurityAgent
+		case "design_fast":
+			v = r.DesignAgentFast
+		case "design_standard":
+			v = r.DesignAgentStandard
+		case "design_thorough":
+			v = r.DesignAgentThorough
+		case "design_":
+			v = r.DesignAgent
 		}
 	} else {
 		switch workflow + "_" + level {
@@ -751,6 +775,14 @@ func repoWorkflowField(r *RepoConfig, workflow, level string, isAgent bool) stri
 			v = r.SecurityModelThorough
 		case "security_":
 			v = r.SecurityModel
+		case "design_fast":
+			v = r.DesignModelFast
+		case "design_standard":
+			v = r.DesignModelStandard
+		case "design_thorough":
+			v = r.DesignModelThorough
+		case "design_":
+			v = r.DesignModel
 		}
 	}
 	return strings.TrimSpace(v)
@@ -795,6 +827,14 @@ func globalWorkflowField(g *Config, workflow, level string, isAgent bool) string
 			v = g.SecurityAgentThorough
 		case "security_":
 			v = g.SecurityAgent
+		case "design_fast":
+			v = g.DesignAgentFast
+		case "design_standard":
+			v = g.DesignAgentStandard
+		case "design_thorough":
+			v = g.DesignAgentThorough
+		case "design_":
+			v = g.DesignAgent
 		}
 	} else {
 		switch workflow + "_" + level {
@@ -830,6 +870,14 @@ func globalWorkflowField(g *Config, workflow, level string, isAgent bool) string
 			v = g.SecurityModelThorough
 		case "security_":
 			v = g.SecurityModel
+		case "design_fast":
+			v = g.DesignModelFast
+		case "design_standard":
+			v = g.DesignModelStandard
+		case "design_thorough":
+			v = g.DesignModelThorough
+		case "design_":
+			v = g.DesignModel
 		}
 	}
 	return strings.TrimSpace(v)

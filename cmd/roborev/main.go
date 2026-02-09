@@ -698,7 +698,6 @@ func reviewCmd() *cobra.Command {
 		fast       bool
 		quiet      bool
 		dirty      bool
-		design     bool
 		wait       bool
 		branch     bool
 		baseBranch string
@@ -718,8 +717,7 @@ Examples:
   roborev review abc123 def456  # Review range from abc123 to def456 (inclusive)
   roborev review --dirty      # Review uncommitted changes
   roborev review --dirty --wait  # Review uncommitted changes and wait for result
-  roborev review --design     # Review HEAD as a design document
-  roborev review --design abc123  # Review specific commit as a design document
+  roborev review --type design   # Design-focused review of HEAD
   roborev review --branch     # Review all commits on current branch since main
   roborev review --branch --base develop  # Review branch against develop
   roborev review --since HEAD~5  # Review last 5 commits
@@ -770,9 +768,6 @@ Examples:
 			if branch && dirty {
 				return fmt.Errorf("cannot use --branch with --dirty")
 			}
-			if design && dirty {
-				return fmt.Errorf("cannot use --design with --dirty")
-			}
 			if branch && since != "" {
 				return fmt.Errorf("cannot use --branch with --since")
 			}
@@ -787,8 +782,8 @@ Examples:
 			}
 
 			// Validate --type flag
-			if reviewType != "" && reviewType != "security" {
-				return fmt.Errorf("invalid --type %q (valid: security)", reviewType)
+			if reviewType != "" && reviewType != "security" && reviewType != "design" {
+				return fmt.Errorf("invalid --type %q (valid: security, design)", reviewType)
 			}
 
 			var gitRef string
@@ -896,7 +891,7 @@ Examples:
 
 			// Handle --local mode: run agent directly without daemon
 			if local {
-				return runLocalReview(cmd, root, gitRef, diffContent, agent, model, reasoning, reviewType, quiet, design)
+				return runLocalReview(cmd, root, gitRef, diffContent, agent, model, reasoning, reviewType, quiet)
 			}
 
 			// Build request body
@@ -909,16 +904,6 @@ Examples:
 				"reasoning":    reasoning,
 				"review_type":  reviewType,
 				"diff_content": diffContent,
-			}
-
-			// For --design, build design review prompt and send via custom_prompt
-			if design {
-				designPrompt, err := prompt.NewBuilder(nil).BuildDesignReview(root, gitRef, agent)
-				if err != nil {
-					return fmt.Errorf("build design review prompt: %w", err)
-				}
-				reqFields["custom_prompt"] = designPrompt
-				reqFields["git_ref"] = "design-review"
 			}
 
 			reqBody, _ := json.Marshal(reqFields)
@@ -984,19 +969,18 @@ Examples:
 	cmd.Flags().BoolVar(&fast, "fast", false, "shorthand for --reasoning fast")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress output (for use in hooks)")
 	cmd.Flags().BoolVar(&dirty, "dirty", false, "review uncommitted changes instead of a commit")
-	cmd.Flags().BoolVar(&design, "design", false, "review commit as a design document instead of code")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for review to complete and show result")
 	cmd.Flags().BoolVar(&branch, "branch", false, "review all changes since branch diverged from base")
 	cmd.Flags().StringVar(&baseBranch, "base", "", "base branch for --branch comparison (default: auto-detect)")
 	cmd.Flags().StringVar(&since, "since", "", "review commits since this commit (exclusive, like git's .. range)")
 	cmd.Flags().BoolVar(&local, "local", false, "run review locally without daemon (streams output to console)")
-	cmd.Flags().StringVar(&reviewType, "type", "", "review type (e.g., security) — changes system prompt")
+	cmd.Flags().StringVar(&reviewType, "type", "", "review type (security, design) — changes system prompt")
 
 	return cmd
 }
 
 // runLocalReview runs a review directly without the daemon
-func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName, model, reasoning, reviewType string, quiet bool, design bool) error {
+func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName, model, reasoning, reviewType string, quiet bool) error {
 	// Load config
 	cfg, err := config.LoadGlobal()
 	if err != nil {
@@ -1043,9 +1027,7 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 
 	// Build prompt
 	var reviewPrompt string
-	if design {
-		reviewPrompt, err = prompt.NewBuilder(nil).BuildDesignReview(repoPath, gitRef, a.Name())
-	} else if diffContent != "" {
+	if diffContent != "" {
 		// Dirty review
 		reviewPrompt, err = prompt.NewBuilder(nil).BuildDirty(repoPath, diffContent, 0, cfg.ReviewContextCount, a.Name(), reviewType)
 	} else {

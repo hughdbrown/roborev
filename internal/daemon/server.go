@@ -436,8 +436,8 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	if req.ReviewType == "" {
 		req.ReviewType = "general"
 	}
-	if req.ReviewType != "general" && req.ReviewType != "security" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid review_type %q (valid: general, security)", req.ReviewType))
+	if req.ReviewType != "general" && req.ReviewType != "security" && req.ReviewType != "design" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid review_type %q (valid: general, security, design)", req.ReviewType))
 		return
 	}
 

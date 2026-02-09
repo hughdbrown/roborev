@@ -142,6 +142,9 @@ func (b *Builder) BuildDirty(repoPath, diff string, repoID int64, contextCount i
 	if reviewType != "" && reviewType != "general" {
 		promptType = reviewType
 	}
+	if promptType == "design" {
+		promptType = "design-review"
+	}
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
 
@@ -204,6 +207,9 @@ func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextC
 	promptType := "review"
 	if reviewType != "" && reviewType != "general" {
 		promptType = reviewType
+	}
+	if promptType == "design" {
+		promptType = "design-review"
 	}
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
@@ -285,6 +291,9 @@ func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, cont
 	promptType := "range"
 	if reviewType != "" && reviewType != "general" {
 		promptType = reviewType
+	}
+	if promptType == "design" {
+		promptType = "design-review"
 	}
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
@@ -494,50 +503,6 @@ After reviewing, provide:
 5. A verdict: Pass or Fail with brief justification
 
 If you find no issues, state "No issues found." after the summary.`
-
-// BuildDesignReview constructs a prompt for reviewing design documents in a commit
-func (b *Builder) BuildDesignReview(repoPath, gitRef, agentName string) (string, error) {
-	var sb strings.Builder
-
-	// Start with design review system prompt
-	sb.WriteString(GetSystemPrompt(agentName, "design-review"))
-	sb.WriteString("\n")
-
-	// Add project-specific guidelines if configured
-	if repoCfg, err := config.LoadRepoConfig(repoPath); err == nil && repoCfg != nil {
-		b.writeProjectGuidelines(&sb, repoCfg.ReviewGuidelines)
-	}
-
-	// Get the diff containing the design document changes
-	diff, err := git.GetDiff(repoPath, gitRef)
-	if err != nil {
-		return "", fmt.Errorf("get diff: %w", err)
-	}
-
-	sb.WriteString("## Design Document Changes\n\n")
-	sb.WriteString("The following diff contains design document changes to review.\n\n")
-
-	// Build diff section
-	var diffSection strings.Builder
-	diffSection.WriteString("### Diff\n\n")
-	diffSection.WriteString("```diff\n")
-	diffSection.WriteString(diff)
-	if !strings.HasSuffix(diff, "\n") {
-		diffSection.WriteString("\n")
-	}
-	diffSection.WriteString("```\n")
-
-	// Check if adding the diff would exceed max prompt size
-	if sb.Len()+diffSection.Len() > MaxPromptSize {
-		sb.WriteString("### Diff\n\n")
-		sb.WriteString("(Diff too large to include - please review the commit directly)\n")
-		sb.WriteString(fmt.Sprintf("View with: git show %s\n", gitRef))
-	} else {
-		sb.WriteString(diffSection.String())
-	}
-
-	return sb.String(), nil
-}
 
 // BuildSimple constructs a simpler prompt without database context
 func BuildSimple(repoPath, sha, agentName string) (string, error) {
