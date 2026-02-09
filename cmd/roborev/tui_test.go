@@ -152,6 +152,10 @@ func withVerdict(v string) func(*storage.ReviewJob) {
 	return func(j *storage.ReviewJob) { j.Verdict = &v }
 }
 
+func withReviewType(rt string) func(*storage.ReviewJob) {
+	return func(j *storage.ReviewJob) { j.ReviewType = rt }
+}
+
 // makeReview creates a storage.Review linked to the given job.
 func makeReview(id int64, job *storage.ReviewJob, opts ...func(*storage.Review)) *storage.Review {
 	r := &storage.Review{
@@ -2994,6 +2998,37 @@ func TestTUIRenderJobLineNoTruncation(t *testing.T) {
 	}
 	if !strings.Contains(line, "test") {
 		t.Error("Agent name should appear untruncated")
+	}
+}
+
+func TestTUIRenderJobLineReviewTypeTag(t *testing.T) {
+	m := tuiModel{width: 80}
+	colWidths := columnWidths{ref: 30, repo: 15, agent: 10}
+
+	tests := []struct {
+		reviewType string
+		wantTag    bool
+	}{
+		{"", false},
+		{"default", false},
+		{"general", false},
+		{"review", false},
+		{"security", true},
+		{"design", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.reviewType, func(t *testing.T) {
+			job := makeJob(1, withRef("abc1234"), withReviewType(tc.reviewType))
+			line := m.renderJobLine(job, false, 3, colWidths)
+			hasTag := strings.Contains(line, "["+tc.reviewType+"]")
+			if tc.wantTag && !hasTag {
+				t.Errorf("expected [%s] tag in line: %s", tc.reviewType, line)
+			}
+			if !tc.wantTag && tc.reviewType != "" && hasTag {
+				t.Errorf("unexpected [%s] tag in line: %s", tc.reviewType, line)
+			}
+		})
 	}
 }
 

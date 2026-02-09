@@ -616,3 +616,19 @@ func TestBuildDirtyWithReviewAlias(t *testing.T) {
 		t.Error("Expected dirty system prompt for reviewType=review alias, got wrong prompt type")
 	}
 }
+
+func TestBuildRangeWithReviewAlias(t *testing.T) {
+	repoPath, commits := setupTestRepo(t)
+	// Use a two-commit range
+	rangeRef := commits[3] + ".." + commits[5]
+
+	b := NewBuilder(nil)
+	prompt, err := b.Build(repoPath, rangeRef, 0, 0, "test", "review")
+	if err != nil {
+		t.Fatalf("Build (range) failed: %v", err)
+	}
+	// Should use the range system prompt, not single-commit
+	if !strings.Contains(prompt, "commit range") {
+		t.Error("Expected range system prompt for reviewType=review alias, got wrong prompt type")
+	}
+}
