@@ -117,6 +117,11 @@ func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 	// Build the request
 	reqData := a.buildRequest(prompt)
 
+	// Validate model name
+	if err := validateOllamaModel(reqData.Model); err != nil {
+		return "", err
+	}
+
 	// Marshal to JSON
 	reqBody, err := json.Marshal(reqData)
 	if err != nil {
@@ -225,6 +230,25 @@ func (a *OllamaAgent) classifyError(err error, statusCode int, model string) err
 		return fmt.Errorf("ollama request failed (status %d): %w", statusCode, err)
 	}
 	return fmt.Errorf("ollama request failed: %w", err)
+}
+
+// validateOllamaModel checks if a model name is valid
+func validateOllamaModel(model string) error {
+	if model == "" {
+		return fmt.Errorf("model name cannot be empty")
+	}
+	// Ollama model names are alphanumeric with optional : - _ . characters
+	// Examples: llama3, qwen2.5-coder:latest, mistral:7b-instruct
+	for i, r := range model {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		if r == ':' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return fmt.Errorf("invalid model name %q: contains invalid character %q at position %d", model, r, i)
+	}
+	return nil
 }
 
 // ResolveOllamaBaseURL determines the Ollama base URL from config or environment.
