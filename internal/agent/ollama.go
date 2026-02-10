@@ -39,18 +39,36 @@ func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 
 // WithReasoning returns a copy of the agent with the specified reasoning level
 func (a *OllamaAgent) WithReasoning(level ReasoningLevel) Agent {
-	// TODO: Implement in Task 1.2
-	return a
+	return &OllamaAgent{
+		BaseURL:    a.BaseURL,
+		Model:      a.Model,
+		Reasoning:  level,
+		Agentic:    a.Agentic,
+		HTTPClient: a.HTTPClient,
+	}
 }
 
 // WithAgentic returns a copy of the agent configured for agentic mode
 func (a *OllamaAgent) WithAgentic(agentic bool) Agent {
-	// TODO: Implement in Task 1.2
-	return a
+	return &OllamaAgent{
+		BaseURL:    a.BaseURL,
+		Model:      a.Model,
+		Reasoning:  a.Reasoning,
+		Agentic:    agentic,
+		HTTPClient: a.HTTPClient,
+	}
 }
 
 // WithModel returns a copy of the agent configured to use the specified model
 func (a *OllamaAgent) WithModel(model string) Agent {
-	// TODO: Implement in Task 1.2
-	return a
+	if model == "" {
+		return a
+	}
+	return &OllamaAgent{
+		BaseURL:    a.BaseURL,
+		Model:      model,
+		Reasoning:  a.Reasoning,
+		Agentic:    a.Agentic,
+		HTTPClient: a.HTTPClient,
+	}
 }
