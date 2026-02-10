@@ -1,0 +1,28 @@
+# Example configuration for using Ollama with roborev
+# Copy this file to .roborev.toml in your repository root
+
+# Agent configuration
+agent = "ollama"
+model = "qwen2.5-coder:latest"
+
+# Reasoning level: fast, standard, thorough
+# - fast: Quick reviews with higher creativity (temp=1.0)
+# - standard: Balanced reviews (temp=0.7) [default]
+# - thorough: Careful, focused reviews (temp=0.3)
+review_reasoning = "standard"
+
+# Optional: Ollama server URL
+# If not specified, uses OLLAMA_HOST env var or defaults to http://localhost:11434
+# ollama_base_url = "http://remote-server:11434"
+
+# Review guidelines (optional)
+# review_guidelines = """
+# Focus on:
+# - Security vulnerabilities
+# - Performance issues
+# - Code maintainability
+# """
+
+# Agentic mode (optional, cosmetic only for Ollama)
+# When enabled, adds tool descriptions to prompts
+# agentic = false
