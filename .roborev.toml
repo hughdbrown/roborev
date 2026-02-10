@@ -1,3 +1,6 @@
+# Ollama configuration for testing
+ollama_base_url = "http://10.0.0.222:11434"
+
 review_guidelines = """
 The daemon and client evolve in lockstep, and the daemon is restarted after
 updates and so API changes do not require backward compatibility shims, and
