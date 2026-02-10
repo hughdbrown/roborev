@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -224,6 +225,31 @@ func (a *OllamaAgent) classifyError(err error, statusCode int, model string) err
 		return fmt.Errorf("ollama request failed (status %d): %w", statusCode, err)
 	}
 	return fmt.Errorf("ollama request failed: %w", err)
+}
+
+// ResolveOllamaBaseURL determines the Ollama base URL from config or environment.
+// Priority (highest to lowest):
+// 1. Config TOML: cfg.OllamaBaseURL (if cfg != nil and non-empty)
+// 2. OLLAMA_HOST environment variable
+// 3. Default: http://localhost:11434
+func ResolveOllamaBaseURL(cfg interface{}) string {
+	// Check if config provides base URL
+	type ollamaConfigGetter interface {
+		GetOllamaBaseURL() string
+	}
+	if c, ok := cfg.(ollamaConfigGetter); ok {
+		if url := c.GetOllamaBaseURL(); url != "" {
+			return url
+		}
+	}
+
+	// Check environment variable
+	if envURL := os.Getenv("OLLAMA_HOST"); envURL != "" {
+		return envURL
+	}
+
+	// Default
+	return "http://localhost:11434"
 }
 
 func init() {
