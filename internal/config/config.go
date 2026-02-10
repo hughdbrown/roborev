@@ -330,6 +330,9 @@ type RepoConfig struct {
 	RefineReasoning    string   `toml:"refine_reasoning"` // Reasoning level for refine: thorough, standard, fast
 	FixReasoning       string   `toml:"fix_reasoning"`    // Reasoning level for fix: thorough, standard, fast
 
+	// Ollama configuration
+	OllamaBaseURL string `toml:"ollama_base_url"` // Ollama server URL (default: http://localhost:11434)
+
 	// CI-specific overrides (used by CI poller for this repo)
 	CI RepoCIConfig `toml:"ci"`
 
@@ -386,6 +389,12 @@ type RepoConfig struct {
 // Implements the interface expected by agent.ResolveOllamaBaseURL.
 func (c *Config) GetOllamaBaseURL() string {
 	return c.OllamaBaseURL
+}
+
+// GetOllamaBaseURL returns the configured Ollama base URL from repo config.
+// Implements the interface expected by agent.ResolveOllamaBaseURL.
+func (r *RepoConfig) GetOllamaBaseURL() string {
+	return r.OllamaBaseURL
 }
 
 // DefaultConfig returns the default configuration

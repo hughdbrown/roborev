@@ -179,16 +179,17 @@ func (m *mockDaemonClient) WithJob(id int64, gitRef string, status storage.JobSt
 var _ daemon.Client = (*mockDaemonClient)(nil)
 
 func TestSelectRefineAgentCodexFallback(t *testing.T) {
-	// With an empty PATH, no real agents are available and the test agent
-	// is excluded from production fallback, so we expect an error.
+	// With an empty PATH, no CLI-based agents are available.
+	// Ollama (HTTP-based, no binary) is always registered, so it
+	// becomes the fallback instead of returning an error.
 	t.Setenv("PATH", "")
 
-	_, err := selectRefineAgent("codex", agent.ReasoningFast, "")
-	if err == nil {
-		t.Fatal("expected error when no agents are available")
+	selected, err := selectRefineAgent("codex", agent.ReasoningFast, "")
+	if err != nil {
+		t.Fatalf("expected ollama fallback, got error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no agents available") {
-		t.Fatalf("expected 'no agents available' error, got: %v", err)
+	if selected.Name() != "ollama" {
+		t.Fatalf("expected ollama as fallback agent, got %q", selected.Name())
 	}
 }
 

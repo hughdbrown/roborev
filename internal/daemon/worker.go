@@ -322,6 +322,21 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		return
 	}
 
+	// Configure Ollama agent with BaseURL from config if applicable
+	if baseAgent.Name() == "ollama" {
+		if ollamaAgent, ok := baseAgent.(*agent.OllamaAgent); ok {
+			// Load repo config to get ollama_base_url
+			repoCfg, _ := config.LoadRepoConfig(job.RepoPath)
+			baseURL := agent.ResolveOllamaBaseURL(repoCfg)
+			log.Printf("[%s] Ollama agent: current BaseURL=%q, resolved BaseURL=%q", workerID, ollamaAgent.BaseURL, baseURL)
+			if baseURL != ollamaAgent.BaseURL {
+				// Create new agent with resolved BaseURL
+				baseAgent = agent.NewOllamaAgent(baseURL)
+				log.Printf("[%s] Created new Ollama agent with BaseURL=%q", workerID, baseURL)
+			}
+		}
+	}
+
 	// Use reasoning level from job (defaults to thorough for legacy rows)
 	// Normalize legacy mixed-case/whitespace values (e.g., "FAST", "High") before parsing
 	reasoning := strings.ToLower(strings.TrimSpace(job.Reasoning))

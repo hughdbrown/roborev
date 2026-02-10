@@ -2817,10 +2817,11 @@ func TestHandleEnqueueAgentAvailability(t *testing.T) {
 			expectedCode:  http.StatusCreated,
 		},
 		{
-			name:         "no agents available returns 503",
-			requestAgent: "codex",
-			mockBinaries: nil,
-			expectedCode: http.StatusServiceUnavailable,
+			name:          "no CLI agents falls back to ollama",
+			requestAgent:  "codex",
+			mockBinaries:  nil,
+			expectedAgent: "ollama",
+			expectedCode:  http.StatusCreated,
 		},
 	}
 

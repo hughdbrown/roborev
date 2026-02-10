@@ -340,6 +340,16 @@ func ResolveOllamaBaseURL(cfg interface{}) string {
 	return "http://localhost:11434"
 }
 
+// CommandLine returns a representative command line for this agent.
+// Ollama uses an HTTP API rather than a CLI binary.
+func (a *OllamaAgent) CommandLine() string {
+	model := a.Model
+	if model == "" {
+		model = "<default>"
+	}
+	return fmt.Sprintf("ollama run %s (via %s)", model, a.BaseURL)
+}
+
 func init() {
 	Register(NewOllamaAgent(""))
 }
