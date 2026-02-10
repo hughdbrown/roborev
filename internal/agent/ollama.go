@@ -280,7 +280,7 @@ func (a *OllamaAgent) classifyError(err error, statusCode int, model string) err
 	case 404:
 		return fmt.Errorf("model %q not found. Pull it with: ollama pull %s\nList available models: ollama list", model, model)
 	case 500, 502, 503, 504:
-		return fmt.Errorf("ollama server error (status %d): %s\nCheck Ollama logs for details", statusCode, errMsg)
+		return fmt.Errorf("ollama server error (status %d): %s\nCheck Ollama logs: journalctl -u ollama (Linux) or check console output", statusCode, errMsg)
 	}
 
 	// Return original error with context
