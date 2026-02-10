@@ -202,7 +202,73 @@ func ensureDaemon() error {
 	return startDaemon()
 }
 
-// startDaemon starts a new daemon process
+// gitRepoEnvKeys lists git environment variables that bind commands to a
+// specific repository or worktree. These must be stripped when spawning the
+// daemon so it resolves refs from the repo_path in each request, not from
+// whichever hook context started it.
+//
+// Auth/transport vars (GIT_SSH_COMMAND, GIT_ASKPASS, GIT_TERMINAL_PROMPT, etc.)
+// are intentionally preserved since the daemon may need them for CI poller
+// fetches or other git transport operations.
+var gitRepoEnvKeys = map[string]struct{}{
+	"GIT_DIR":                          {},
+	"GIT_WORK_TREE":                    {},
+	"GIT_INDEX_FILE":                   {},
+	"GIT_OBJECT_DIRECTORY":             {},
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
+	"GIT_COMMON_DIR":                   {},
+	"GIT_CEILING_DIRECTORIES":          {},
+	"GIT_NAMESPACE":                    {},
+	"GIT_PREFIX":                       {},
+	"GIT_QUARANTINE_PATH":              {},
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
+	"GIT_CONFIG_PARAMETERS":            {}, // carries git -c options from parent
+	"GIT_CONFIG_COUNT":                 {}, // git 2.31+ config propagation
+	"GIT_CONFIG_GLOBAL":                {}, // redirects to alternate global config
+	"GIT_CONFIG_SYSTEM":                {}, // redirects to alternate system config
+	"GIT_EXTERNAL_DIFF":                {}, // would replace diff output with external tool
+	"GIT_DIFF_OPTS":                    {}, // alters diff output format
+}
+
+// gitRepoEnvPrefixes lists key prefixes for numbered git config propagation
+// variables (GIT_CONFIG_KEY_0, GIT_CONFIG_VALUE_0, etc.) that should also
+// be stripped.
+var gitRepoEnvPrefixes = []string{
+	"GIT_CONFIG_KEY_",
+	"GIT_CONFIG_VALUE_",
+}
+
+// isGitRepoEnvKey reports whether a KEY=value entry is a git repo-context
+// variable that should be stripped from daemon environments.
+// Uses case-insensitive comparison because Windows env vars are case-insensitive.
+func isGitRepoEnvKey(entry string) bool {
+	key, _, _ := strings.Cut(entry, "=")
+	upper := strings.ToUpper(key)
+	if _, ok := gitRepoEnvKeys[upper]; ok {
+		return true
+	}
+	for _, prefix := range gitRepoEnvPrefixes {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterGitEnv returns a copy of env with git repo-context variables removed.
+// Git sets variables like GIT_DIR in hook contexts; if the daemon inherits them,
+// git commands resolve HEAD from the wrong worktree/repo.
+func filterGitEnv(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if isGitRepoEnvKey(e) {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
+}
+
 func startDaemon() error {
 	if verbose {
 		fmt.Println("Starting daemon...")
@@ -215,6 +281,7 @@ func startDaemon() error {
 	}
 
 	cmd := exec.Command(exe, "daemon", "run")
+	cmd.Env = filterGitEnv(os.Environ())
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -552,6 +619,16 @@ func daemonRunCmd() *cobra.Command {
 		Short: "Run the daemon in foreground",
 		Long:  "Run the daemon in the foreground. Usually invoked by 'daemon start' in the background.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Defense-in-depth: clear git repo-context env vars that hooks may set.
+			// The spawn sites (startDaemon, upgrade) filter these out, but
+			// clear them here too in case the daemon is started manually.
+			for _, e := range os.Environ() {
+				if isGitRepoEnvKey(e) {
+					key, _, _ := strings.Cut(e, "=")
+					os.Unsetenv(key)
+				}
+			}
+
 			log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 			log.Println("Starting roborev daemon...")
 
@@ -2500,6 +2577,7 @@ official release over a dev build.`,
 					newBinary += ".exe"
 				}
 				startCmd := exec.Command(newBinary, "daemon", "run")
+				startCmd.Env = filterGitEnv(os.Environ())
 				if err := startCmd.Start(); err != nil {
 					fmt.Printf("warning: failed to start daemon: %v\n", err)
 				} else {

@@ -1219,6 +1219,49 @@ func TestShowJobFlagRequiresArgument(t *testing.T) {
 }
 
 // ============================================================================
+// filterGitEnv Tests
+// ============================================================================
+
+func TestFilterGitEnv(t *testing.T) {
+	env := []string{
+		"PATH=/usr/bin",
+		"GIT_DIR=/some/repo/.git",
+		"HOME=/home/user",
+		"GIT_WORK_TREE=/some/repo",
+		"GIT_INDEX_FILE=/some/repo/.git/index",
+		"ROBOREV_DATA_DIR=/tmp/roborev",
+		"GIT_CEILING_DIRECTORIES=/home",
+		"Git_Dir=/mixed/case",                        // Windows-style mixed case
+		"git_work_tree=/lowercase",                   // all lowercase
+		"GIT_SSH_COMMAND=ssh -i ~/.ssh/deploy_key",   // auth/transport: keep
+		"GIT_ASKPASS=/usr/lib/ssh/askpass",           // auth/transport: keep
+		"GIT_CONFIG_PARAMETERS='core.autocrlf=true'", // config propagation: strip
+		"GIT_CONFIG_COUNT=1",                         // config propagation: strip
+		"GIT_CONFIG_KEY_0=core.autocrlf",             // numbered config: strip
+		"GIT_CONFIG_VALUE_0=true",                    // numbered config: strip
+	}
+
+	filtered := filterGitEnv(env)
+
+	want := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/user",
+		"ROBOREV_DATA_DIR=/tmp/roborev",
+		"GIT_SSH_COMMAND=ssh -i ~/.ssh/deploy_key",
+		"GIT_ASKPASS=/usr/lib/ssh/askpass",
+	}
+
+	if len(filtered) != len(want) {
+		t.Fatalf("got %d entries, want %d: %v", len(filtered), len(want), filtered)
+	}
+	for i, got := range filtered {
+		if got != want[i] {
+			t.Errorf("entry %d: got %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+// ============================================================================
 // Daemon Run Tests
 // ============================================================================
 
