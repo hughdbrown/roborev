@@ -226,6 +226,10 @@ func (a *OllamaAgent) classifyError(err error, statusCode int, model string) err
 	return fmt.Errorf("ollama request failed: %w", err)
 }
 
+func init() {
+	Register(NewOllamaAgent(""))
+}
+
 // WithReasoning returns a copy of the agent with the specified reasoning level
 func (a *OllamaAgent) WithReasoning(level ReasoningLevel) Agent {
 	return &OllamaAgent{
