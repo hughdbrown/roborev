@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -133,21 +134,14 @@ func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 	client := a.getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", a.classifyError(err, 0, reqData.Model)
 	}
 	defer resp.Body.Close()
 
 	// Check status code
-	if resp.StatusCode == 404 {
-		return "", fmt.Errorf("model %q not found. Pull it with: ollama pull %s", reqData.Model, reqData.Model)
-	}
-	if resp.StatusCode >= 500 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ollama server error (status %d): %s", resp.StatusCode, string(body))
-	}
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+		return "", a.classifyError(fmt.Errorf("%s", string(body)), resp.StatusCode, reqData.Model)
 	}
 
 	// Parse streaming response
@@ -202,6 +196,34 @@ func (a *OllamaAgent) parseStream(reader io.Reader, output io.Writer) (string, e
 	}
 
 	return finalResult, nil
+}
+
+// classifyError converts raw errors into user-friendly messages with actionable next steps
+func (a *OllamaAgent) classifyError(err error, statusCode int, model string) error {
+	// Check for timeout
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("ollama request timed out. Try: 1) Use a smaller/faster model, 2) Increase timeout in config")
+	}
+
+	// Check for connection refused (server not running)
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "connection refused") || strings.Contains(errMsg, "connect: connection refused") {
+		return fmt.Errorf("ollama server not reachable at %s. Is Ollama running? Start with: ollama serve", a.BaseURL)
+	}
+
+	// Handle HTTP status codes
+	switch statusCode {
+	case 404:
+		return fmt.Errorf("model %q not found. Pull it with: ollama pull %s\nList available models: ollama list", model, model)
+	case 500, 502, 503, 504:
+		return fmt.Errorf("ollama server error (status %d): %s\nCheck Ollama logs for details", statusCode, errMsg)
+	}
+
+	// Return original error with context
+	if statusCode > 0 {
+		return fmt.Errorf("ollama request failed (status %d): %w", statusCode, err)
+	}
+	return fmt.Errorf("ollama request failed: %w", err)
 }
 
 // WithReasoning returns a copy of the agent with the specified reasoning level
