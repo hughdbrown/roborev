@@ -2,9 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -344,6 +347,195 @@ func TestOllamaAgent_checkHealth(t *testing.T) {
 			t.Errorf("checkHealth() error should mention status code, got: %s", err.Error())
 		}
 	})
+}
+
+// Integration tests that combine multiple features
+
+func TestOllamaAgent_Integration_FullReview(t *testing.T) {
+	// Simulate a complete review with multi-line streaming response
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		// Multi-line response simulating a real review
+		responses := []string{
+			`{"message":{"role":"assistant","content":"# Code Review\n\n"},"done":false}`,
+			`{"message":{"role":"assistant","content":"## Issues Found\n\n"},"done":false}`,
+			`{"message":{"role":"assistant","content":"1. Missing error handling on line 42\n"},"done":false}`,
+			`{"message":{"role":"assistant","content":"2. Potential nil pointer dereference\n"},"done":false}`,
+			`{"message":{"role":"assistant","content":"\n## Suggestions\n\n"},"done":false}`,
+			`{"message":{"role":"assistant","content":"Consider adding validation before use.\n"},"done":false}`,
+			`{"message":{"role":"assistant","content":""},"done":true}`,
+		}
+		for _, resp := range responses {
+			w.Write([]byte(resp + "\n"))
+		}
+	}))
+	defer server.Close()
+
+	agent := NewOllamaAgent(server.URL)
+	agent = agent.WithModel("qwen2.5-coder:latest").(*OllamaAgent)
+
+	var outputBuf strings.Builder
+	result, err := agent.Review(context.Background(), "/tmp/repo", "abc123", "Review this commit", &outputBuf)
+	if err != nil {
+		t.Fatalf("Integration test failed: %v", err)
+	}
+
+	// Verify complete result
+	expectedContent := []string{
+		"# Code Review",
+		"## Issues Found",
+		"Missing error handling",
+		"nil pointer dereference",
+		"## Suggestions",
+		"Consider adding validation",
+	}
+	for _, expected := range expectedContent {
+		if !strings.Contains(result, expected) {
+			t.Errorf("Result missing expected content %q", expected)
+		}
+	}
+
+	// Verify streaming worked
+	streamed := outputBuf.String()
+	if streamed != result {
+		t.Errorf("Streamed output should match result")
+	}
+}
+
+func TestOllamaAgent_Integration_ReasoningLevels(t *testing.T) {
+	// Verify that reasoning levels properly configure temperature/top_p
+	tests := []struct {
+		name     string
+		level    ReasoningLevel
+		wantTemp float64
+		wantTopP float64
+	}{
+		{"thorough", ReasoningThorough, 0.3, 0.9},
+		{"standard", ReasoningStandard, 0.7, 0.95},
+		{"fast", ReasoningFast, 1.0, 1.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &OllamaAgent{
+				Model:     "llama3:7b",
+				Reasoning: tt.level,
+			}
+
+			req := agent.buildRequest("test prompt")
+
+			// Verify temperature
+			temp, ok := req.Options["temperature"].(float64)
+			if !ok || temp != tt.wantTemp {
+				t.Errorf("temperature = %v, want %v", req.Options["temperature"], tt.wantTemp)
+			}
+
+			// Verify top_p
+			topP, ok := req.Options["top_p"].(float64)
+			if !ok || topP != tt.wantTopP {
+				t.Errorf("top_p = %v, want %v", req.Options["top_p"], tt.wantTopP)
+			}
+		})
+	}
+}
+
+func TestOllamaAgent_Integration_AgenticMode(t *testing.T) {
+	// Verify that agentic mode properly augments prompts and gets sent to server
+	var receivedPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture the request to verify prompt augmentation
+		var reqData ollamaChatRequest
+		json.NewDecoder(r.Body).Decode(&reqData)
+		if len(reqData.Messages) > 1 {
+			receivedPrompt = reqData.Messages[1].Content
+		}
+
+		w.WriteHeader(200)
+		w.Write([]byte(`{"message":{"role":"assistant","content":"OK"},"done":true}` + "\n"))
+	}))
+	defer server.Close()
+
+	agent := NewOllamaAgent(server.URL)
+	agent = agent.WithAgentic(true).(*OllamaAgent)
+
+	originalPrompt := "Review this code"
+	_, err := agent.Review(context.Background(), "/tmp", "abc123", originalPrompt, nil)
+	if err != nil {
+		t.Fatalf("Review failed: %v", err)
+	}
+
+	// Verify prompt was augmented
+	if !strings.Contains(receivedPrompt, originalPrompt) {
+		t.Error("Prompt should contain original text")
+	}
+	if !strings.Contains(receivedPrompt, "read_file") {
+		t.Error("Agentic prompt should contain read_file tool")
+	}
+	if !strings.Contains(receivedPrompt, "write_file") {
+		t.Error("Agentic prompt should contain write_file tool")
+	}
+	if !strings.Contains(receivedPrompt, "run_command") {
+		t.Error("Agentic prompt should contain run_command tool")
+	}
+}
+
+func TestOllamaAgent_Integration_StreamingOutput(t *testing.T) {
+	// Verify that streaming outputs chunks in real-time as they arrive
+	var streamedChunks []string
+	var streamMutex sync.Mutex
+
+	// Custom writer that captures each write call
+	captureWriter := &captureEachWrite{
+		onWrite: func(data []byte) {
+			streamMutex.Lock()
+			streamedChunks = append(streamedChunks, string(data))
+			streamMutex.Unlock()
+		},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		chunks := []string{"First ", "Second ", "Third"}
+		for _, chunk := range chunks {
+			w.Write([]byte(fmt.Sprintf(`{"message":{"role":"assistant","content":"%s"},"done":false}`+"\n", chunk)))
+		}
+		w.Write([]byte(`{"message":{"role":"assistant","content":""},"done":true}` + "\n"))
+	}))
+	defer server.Close()
+
+	agent := NewOllamaAgent(server.URL)
+	result, err := agent.Review(context.Background(), "/tmp", "abc123", "test", captureWriter)
+	if err != nil {
+		t.Fatalf("Review failed: %v", err)
+	}
+
+	// Verify result is correct
+	if result != "First Second Third" {
+		t.Errorf("Result = %q, want %q", result, "First Second Third")
+	}
+
+	// Verify chunks were streamed individually
+	streamMutex.Lock()
+	defer streamMutex.Unlock()
+	if len(streamedChunks) != 3 {
+		t.Errorf("Expected 3 streaming chunks, got %d", len(streamedChunks))
+	}
+	expectedChunks := []string{"First ", "Second ", "Third"}
+	for i, expected := range expectedChunks {
+		if i >= len(streamedChunks) || streamedChunks[i] != expected {
+			t.Errorf("Chunk %d = %q, want %q", i, streamedChunks[i], expected)
+		}
+	}
+}
+
+// Helper for capturing individual write calls
+type captureEachWrite struct {
+	onWrite func([]byte)
+}
+
+func (c *captureEachWrite) Write(p []byte) (n int, err error) {
+	c.onWrite(p)
+	return len(p), nil
 }
 
 func TestOllamaAgent_buildRequest(t *testing.T) {
