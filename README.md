@@ -78,6 +78,30 @@ roborev tui           # View reviews in interactive UI
 
 https://github.com/user-attachments/assets/c72d7189-9a31-4c1a-a43f-c788cbd97182
 
+### Quick Start with Ollama
+
+For local, private code reviews using open-source models:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start Ollama server
+ollama serve &
+
+# Pull a code review model
+ollama pull qwen2.5-coder:latest
+
+# Configure roborev
+cd your-repo
+echo 'agent = "ollama"' >> .roborev.toml
+
+# Initialize and review
+roborev init
+git commit -m "..."   # Reviews happen automatically using Ollama
+roborev tui           # View reviews
+```
+
 ## The Fix Loop
 
 When reviews find issues, fix them with a single command:
