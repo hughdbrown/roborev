@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 )
+
+const defaultOllamaModel = "qwen2.5-coder:latest"
 
 // OllamaAgent runs code reviews using Ollama servers
 type OllamaAgent struct {
@@ -64,7 +67,7 @@ func (a *OllamaAgent) Name() string {
 func (a *OllamaAgent) buildRequest(prompt string) ollamaChatRequest {
 	model := a.Model
 	if model == "" {
-		model = "qwen2.5-coder:latest"
+		model = defaultOllamaModel
 	}
 
 	options := make(map[string]interface{})
@@ -109,21 +112,16 @@ func (a *OllamaAgent) augmentPromptForAgentic(prompt string) string {
 		return prompt
 	}
 
-	// Append tool descriptions in a format that models like Qwen understand
+	// Append analysis-only tool descriptions. No write/execute tools are available
+	// because Ollama lacks tool-call parsing and execution logic.
 	toolDescriptions := `
 
-You have access to the following tools:
+You have access to the following analysis capabilities:
 
 1. read_file(path: string) -> string
    Read the contents of a file at the given path.
 
-2. write_file(path: string, content: string) -> void
-   Write content to a file at the given path.
-
-3. run_command(command: string) -> string
-   Execute a shell command and return its output.
-
-When you need to use a tool, describe your intention clearly.
+Analyze the code thoroughly and describe any issues or suggestions clearly.
 `
 
 	return prompt + toolDescriptions
@@ -139,22 +137,22 @@ func (a *OllamaAgent) getHTTPClient() *http.Client {
 	}
 }
 
-// checkHealth verifies that the Ollama server is reachable and responding.
+// CheckHealth verifies that the Ollama server is reachable and responding.
 // Returns nil if the server is healthy, or a descriptive error otherwise.
-func (a *OllamaAgent) checkHealth(ctx context.Context) error {
+func (a *OllamaAgent) CheckHealth(ctx context.Context) error {
 	// Create context with timeout to avoid hanging
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	// Make GET request to /api/tags endpoint
-	url := a.BaseURL + "/api/tags"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	healthURL := a.BaseURL + "/api/tags"
+	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		return fmt.Errorf("create health check request: %w", err)
 	}
 
-	// Use a dedicated client with short timeout for health checks
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Use the configured HTTP client so custom transport/TLS settings apply
+	client := a.getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return a.classifyError(err, 0, "")
@@ -171,7 +169,7 @@ func (a *OllamaAgent) checkHealth(ctx context.Context) error {
 // Review runs a code review and returns the output
 func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
 	// Fast-fail: check that the Ollama server is reachable
-	if err := a.checkHealth(ctx); err != nil {
+	if err := a.CheckHealth(ctx); err != nil {
 		return "", err
 	}
 
@@ -210,7 +208,7 @@ func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 
 	// Check status code
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", a.classifyError(fmt.Errorf("%s", string(body)), resp.StatusCode, reqData.Model)
 	}
 
@@ -224,6 +222,9 @@ func (a *OllamaAgent) parseStream(reader io.Reader, output io.Writer) (string, e
 	var result strings.Builder
 	sw := newSyncWriter(output)
 
+	var consecutiveParseFailures int
+	var sawValidJSON bool
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -232,9 +233,16 @@ func (a *OllamaAgent) parseStream(reader io.Reader, output io.Writer) (string, e
 
 		var resp ollamaChatResponse
 		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			// Skip malformed JSON lines silently
+			consecutiveParseFailures++
+			// If we've never seen valid JSON and hit many failures,
+			// the server is likely returning an error page (e.g. HTML from a proxy)
+			if !sawValidJSON && consecutiveParseFailures >= 5 {
+				return "", fmt.Errorf("ollama returned non-JSON response (first line: %s)", truncate(line, 200))
+			}
 			continue
 		}
+		sawValidJSON = true
+		consecutiveParseFailures = 0
 
 		// Check for error in response
 		if resp.Error != "" {
@@ -246,7 +254,9 @@ func (a *OllamaAgent) parseStream(reader io.Reader, output io.Writer) (string, e
 			result.WriteString(resp.Message.Content)
 			// Stream progress to output if provided
 			if sw != nil {
-				sw.Write([]byte(resp.Message.Content))
+				if _, err := sw.Write([]byte(resp.Message.Content)); err != nil {
+					return result.String(), fmt.Errorf("write output: %w", err)
+				}
 			}
 		}
 
@@ -266,6 +276,14 @@ func (a *OllamaAgent) parseStream(reader io.Reader, output io.Writer) (string, e
 	}
 
 	return finalResult, nil
+}
+
+// truncate returns s truncated to maxLen, appending "..." if truncated
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // classifyError converts raw errors into user-friendly messages with actionable next steps
@@ -326,18 +344,32 @@ func ResolveOllamaBaseURL(cfg interface{}) string {
 		GetOllamaBaseURL() string
 	}
 	if c, ok := cfg.(ollamaConfigGetter); ok {
-		if url := c.GetOllamaBaseURL(); url != "" {
-			return url
+		if u := c.GetOllamaBaseURL(); u != "" {
+			return u
 		}
 	}
 
 	// Check environment variable
 	if envURL := os.Getenv("OLLAMA_HOST"); envURL != "" {
-		return envURL
+		return normalizeOllamaURL(envURL)
 	}
 
 	// Default
 	return "http://localhost:11434"
+}
+
+// normalizeOllamaURL ensures a URL has a scheme, preventing malformed URLs
+// like "myserver/api/chat" when users set OLLAMA_HOST=myserver.
+func normalizeOllamaURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	// If no scheme, assume http
+	if parsed.Scheme == "" {
+		return "http://" + rawURL
+	}
+	return rawURL
 }
 
 // CommandLine returns a representative command line for this agent.
@@ -345,7 +377,7 @@ func ResolveOllamaBaseURL(cfg interface{}) string {
 func (a *OllamaAgent) CommandLine() string {
 	model := a.Model
 	if model == "" {
-		model = "<default>"
+		model = defaultOllamaModel
 	}
 	return fmt.Sprintf("ollama run %s (via %s)", model, a.BaseURL)
 }

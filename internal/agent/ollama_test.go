@@ -288,9 +288,7 @@ func TestOllamaAgent_augmentPromptForAgentic(t *testing.T) {
 			contains: []string{
 				"Review this code",
 				"read_file",
-				"write_file",
-				"run_command",
-				"You have access to the following tools",
+				"analysis capabilities",
 			},
 		},
 	}
@@ -337,7 +335,7 @@ func TestOllamaAgent_checkHealth(t *testing.T) {
 		defer server.Close()
 
 		agent := NewOllamaAgent(server.URL)
-		err := agent.checkHealth(context.Background())
+		err := agent.CheckHealth(context.Background())
 		if err != nil {
 			t.Errorf("checkHealth() error = %v, want nil", err)
 		}
@@ -348,7 +346,7 @@ func TestOllamaAgent_checkHealth(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		err := agent.checkHealth(ctx)
+		err := agent.CheckHealth(ctx)
 		if err == nil {
 			t.Error("checkHealth() should return error for unreachable server")
 		}
@@ -365,7 +363,7 @@ func TestOllamaAgent_checkHealth(t *testing.T) {
 		defer server.Close()
 
 		agent := NewOllamaAgent(server.URL)
-		err := agent.checkHealth(context.Background())
+		err := agent.CheckHealth(context.Background())
 		if err == nil {
 			t.Error("checkHealth() should return error for non-200 status")
 		}
@@ -505,11 +503,11 @@ func TestOllamaAgent_Integration_AgenticMode(t *testing.T) {
 	if !strings.Contains(receivedPrompt, "read_file") {
 		t.Error("Agentic prompt should contain read_file tool")
 	}
-	if !strings.Contains(receivedPrompt, "write_file") {
-		t.Error("Agentic prompt should contain write_file tool")
+	if strings.Contains(receivedPrompt, "write_file") {
+		t.Error("Agentic prompt should not contain write_file (no execution support)")
 	}
-	if !strings.Contains(receivedPrompt, "run_command") {
-		t.Error("Agentic prompt should contain run_command tool")
+	if strings.Contains(receivedPrompt, "run_command") {
+		t.Error("Agentic prompt should not contain run_command (no execution support)")
 	}
 }
 

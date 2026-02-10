@@ -1085,6 +1085,20 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 		return fmt.Errorf("get agent: %w", err)
 	}
 
+	// Configure Ollama agent with BaseURL from config (matches daemon behavior)
+	if a.Name() == "ollama" {
+		if ollamaAgent, ok := a.(*agent.OllamaAgent); ok {
+			repoCfg, _ := config.LoadRepoConfig(repoPath)
+			baseURL := agent.ResolveOllamaBaseURL(repoCfg)
+			if baseURL == "http://localhost:11434" && cfg.GetOllamaBaseURL() != "" {
+				baseURL = agent.ResolveOllamaBaseURL(cfg)
+			}
+			if baseURL != ollamaAgent.BaseURL {
+				a = agent.NewOllamaAgent(baseURL)
+			}
+		}
+	}
+
 	// Resolve model using workflow-specific resolution (matches daemon behavior)
 	model = config.ResolveModelForWorkflow(model, repoPath, cfg, workflow, reasoning)
 
@@ -2887,6 +2901,35 @@ Examples:
 
 				a, _ := agent.Get(name)
 				if a == nil {
+					continue
+				}
+
+				// Handle HTTP-based agents (like Ollama) differently from CLI agents
+				if oa, ok := a.(*agent.OllamaAgent); ok {
+					if !agent.IsAvailable(name) {
+						fmt.Printf("  - %-14s (HTTP agent, not configured)\n", name)
+						skipped++
+						continue
+					}
+					fmt.Printf("  ? %-14s %s ... ", name, oa.BaseURL)
+
+					ctx, cancel := context.WithTimeout(context.Background(), timeout)
+					err := oa.CheckHealth(ctx)
+					cancel()
+
+					if err != nil {
+						fmt.Printf("FAIL\n")
+						for _, line := range strings.Split(err.Error(), "\n") {
+							line = strings.TrimSpace(line)
+							if line != "" {
+								fmt.Printf("    %s\n", line)
+							}
+						}
+						failed++
+					} else {
+						fmt.Printf("OK (healthy)\n")
+						passed++
+					}
 					continue
 				}
 

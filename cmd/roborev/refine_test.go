@@ -180,9 +180,10 @@ var _ daemon.Client = (*mockDaemonClient)(nil)
 
 func TestSelectRefineAgentCodexFallback(t *testing.T) {
 	// With an empty PATH, no CLI-based agents are available.
-	// Ollama (HTTP-based, no binary) is always registered, so it
-	// becomes the fallback instead of returning an error.
+	// Ollama (HTTP-based) requires explicit configuration to be available,
+	// so set OLLAMA_HOST to make it the fallback.
 	t.Setenv("PATH", "")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
 
 	selected, err := selectRefineAgent("codex", agent.ReasoningFast, "")
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -150,8 +151,26 @@ func IsAvailable(name string) bool {
 		return err == nil
 	}
 
+	// Ollama is HTTP-based; only report as available if explicitly configured
+	// via OLLAMA_HOST or if the base URL differs from the default (meaning config set it).
+	if oa, ok := a.(*OllamaAgent); ok {
+		return isOllamaConfigured(oa)
+	}
+
 	// Non-command agents (like test) are always available
 	return true
+}
+
+// isOllamaConfigured returns true if the user has explicitly configured Ollama
+// via OLLAMA_HOST env var or if the agent's BaseURL was set to a non-default value.
+func isOllamaConfigured(a *OllamaAgent) bool {
+	if os.Getenv("OLLAMA_HOST") != "" {
+		return true
+	}
+	if a.BaseURL != "" && a.BaseURL != "http://localhost:11434" {
+		return true
+	}
+	return false
 }
 
 // GetAvailable returns an available agent, trying the requested one first,

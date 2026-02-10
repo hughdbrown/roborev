@@ -2830,6 +2830,19 @@ func TestHandleEnqueueAgentAvailability(t *testing.T) {
 			// Each subtest gets its own server/DB to avoid SHA dedup conflicts
 			server, _, _ := newTestServer(t)
 
+			// If this test expects Ollama fallback, set OLLAMA_HOST so it's considered available
+			if tt.expectedAgent == "ollama" {
+				origOllamaHost := os.Getenv("OLLAMA_HOST")
+				os.Setenv("OLLAMA_HOST", "http://localhost:11434")
+				t.Cleanup(func() {
+					if origOllamaHost == "" {
+						os.Unsetenv("OLLAMA_HOST")
+					} else {
+						os.Setenv("OLLAMA_HOST", origOllamaHost)
+					}
+				})
+			}
+
 			// Isolate PATH: only mock binaries + git (no real agent CLIs)
 			origPath := os.Getenv("PATH")
 			mockDir := t.TempDir()

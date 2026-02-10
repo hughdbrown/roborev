@@ -128,12 +128,12 @@ func TestTestAgentStreaming(t *testing.T) {
 			Output: "test output",
 		}
 
-		errWriter := &failingWriter{err: errors.New("write failed")}
+		errWriter := &FailingWriter{Err: errors.New("write failed")}
 		_, err := agent.Review(context.Background(), "/tmp", "abc1234567", "prompt", errWriter)
 		if err == nil {
 			t.Fatal("expected error from failing writer")
 		}
-		if !errors.Is(err, errWriter.err) {
+		if !errors.Is(err, errWriter.Err) {
 			t.Errorf("expected wrapped write error, got: %v", err)
 		}
 	})
@@ -183,15 +183,6 @@ func TestCodexReasoningEffortMapping(t *testing.T) {
 	}
 }
 
-// failingWriter always returns an error on Write
-type failingWriter struct {
-	err error
-}
-
-func (w *failingWriter) Write(p []byte) (int, error) {
-	return 0, w.err
-}
-
 // getAgentModel extracts the model from any agent type
 func getAgentModel(a Agent) string {
 	switch v := a.(type) {
@@ -206,6 +197,8 @@ func getAgentModel(a Agent) string {
 	case *OpenCodeAgent:
 		return v.Model
 	case *CursorAgent:
+		return v.Model
+	case *OllamaAgent:
 		return v.Model
 	default:
 		return ""
@@ -225,6 +218,7 @@ func TestAgentWithModelPersistence(t *testing.T) {
 		{"copilot", func() Agent { return NewCopilotAgent("") }, "gpt-4o", "gpt-4o"},
 		{"opencode", func() Agent { return NewOpenCodeAgent("") }, "anthropic/claude-sonnet-4", "anthropic/claude-sonnet-4"},
 		{"cursor", func() Agent { return NewCursorAgent("") }, "claude-sonnet-4", "claude-sonnet-4"},
+		{"ollama", func() Agent { return NewOllamaAgent("") }, "llama3:70b", "llama3:70b"},
 	}
 
 	for _, tt := range tests {
@@ -270,6 +264,7 @@ func TestWithModelEmptyPreservesDefault(t *testing.T) {
 		{"copilot", func() Agent { return NewCopilotAgent("") }, ""},
 		{"opencode", func() Agent { return NewOpenCodeAgent("") }, ""},
 		{"cursor", func() Agent { return NewCursorAgent("") }, ""},
+		{"ollama", func() Agent { return NewOllamaAgent("") }, ""},
 	}
 
 	for _, tt := range tests {

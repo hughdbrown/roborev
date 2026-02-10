@@ -325,9 +325,17 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	// Configure Ollama agent with BaseURL from config if applicable
 	if baseAgent.Name() == "ollama" {
 		if ollamaAgent, ok := baseAgent.(*agent.OllamaAgent); ok {
-			// Load repo config to get ollama_base_url
-			repoCfg, _ := config.LoadRepoConfig(job.RepoPath)
+			// Load repo config to get ollama_base_url (repo-level override)
+			repoCfg, err := config.LoadRepoConfig(job.RepoPath)
+			if err != nil {
+				log.Printf("[%s] Warning: failed to load repo config for Ollama: %v", workerID, err)
+			}
+			// Try repo config first, then fall back to global config
 			baseURL := agent.ResolveOllamaBaseURL(repoCfg)
+			if baseURL == "http://localhost:11434" && cfg.GetOllamaBaseURL() != "" {
+				// Repo config didn't override; use global config
+				baseURL = agent.ResolveOllamaBaseURL(cfg)
+			}
 			log.Printf("[%s] Ollama agent: current BaseURL=%q, resolved BaseURL=%q", workerID, ollamaAgent.BaseURL, baseURL)
 			if baseURL != ollamaAgent.BaseURL {
 				// Create new agent with resolved BaseURL
