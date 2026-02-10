@@ -76,6 +76,9 @@ type Config struct {
 	ClaudeCodeCmd string `toml:"claude_code_cmd"`
 	CursorCmd     string `toml:"cursor_cmd"`
 
+	// Ollama configuration
+	OllamaBaseURL string `toml:"ollama_base_url"`
+
 	// API keys (optional - agents use subscription auth by default)
 	AnthropicAPIKey string `toml:"anthropic_api_key"`
 
