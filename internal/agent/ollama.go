@@ -1,9 +1,14 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -107,8 +112,96 @@ func (a *OllamaAgent) getHTTPClient() *http.Client {
 
 // Review runs a code review and returns the output
 func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
-	// TODO: Implement in Task 1.4
-	return "", nil
+	// Build the request
+	reqData := a.buildRequest(prompt)
+
+	// Marshal to JSON
+	reqBody, err := json.Marshal(reqData)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	// Create HTTP request to /api/chat
+	url := a.BaseURL + "/api/chat"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Execute request
+	client := a.getHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check status code
+	if resp.StatusCode == 404 {
+		return "", fmt.Errorf("model %q not found. Pull it with: ollama pull %s", reqData.Model, reqData.Model)
+	}
+	if resp.StatusCode >= 500 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("ollama server error (status %d): %s", resp.StatusCode, string(body))
+	}
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse streaming response
+	return a.parseStream(resp.Body, output)
+}
+
+// parseStream parses the NDJSON streaming response from Ollama
+func (a *OllamaAgent) parseStream(reader io.Reader, output io.Writer) (string, error) {
+	scanner := bufio.NewScanner(reader)
+	var result strings.Builder
+	sw := newSyncWriter(output)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var resp ollamaChatResponse
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			// Skip malformed JSON lines silently
+			continue
+		}
+
+		// Check for error in response
+		if resp.Error != "" {
+			return result.String(), fmt.Errorf("ollama error: %s", resp.Error)
+		}
+
+		// Accumulate message content
+		if resp.Message.Content != "" {
+			result.WriteString(resp.Message.Content)
+			// Stream progress to output if provided
+			if sw != nil {
+				sw.Write([]byte(resp.Message.Content))
+			}
+		}
+
+		// Stop when done
+		if resp.Done {
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return result.String(), fmt.Errorf("read stream: %w", err)
+	}
+
+	finalResult := result.String()
+	if finalResult == "" {
+		return "No review output generated", nil
+	}
+
+	return finalResult, nil
 }
 
 // WithReasoning returns a copy of the agent with the specified reasoning level
