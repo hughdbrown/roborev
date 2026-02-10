@@ -36,7 +36,7 @@ You catch problems while context is fresh instead of waiting for PR review.
 - **Code Analysis** - Built-in analysis types (duplication, complexity,
   refactoring, test fixtures, dead code) that agents can fix automatically.
 - **Multi-Agent** - Works with Codex, Claude Code, Gemini, Copilot,
-  OpenCode, Cursor, and Droid.
+  OpenCode, Ollama, Cursor, and Droid.
 - **Runs Locally** - No hosted service or additional infrastructure.
   Reviews are orchestrated on your machine using the coding agents
   you already have configured.
@@ -187,10 +187,50 @@ See [hooks guide](https://roborev.io/guides/hooks/) for details.
 | Gemini | `npm install -g @google/gemini-cli` |
 | Copilot | `npm install -g @github/copilot` |
 | OpenCode | `npm install -g opencode-ai` |
+| Ollama | `curl -fsSL https://ollama.com/install.sh \| sh` |
 | Cursor | [cursor.com](https://www.cursor.com/) |
 | Droid | [factory.ai](https://factory.ai/) |
 
 roborev auto-detects installed agents.
+
+### Using Ollama
+
+[Ollama](https://ollama.ai) provides local, private code reviews using open-source models:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start Ollama server
+ollama serve &
+
+# Pull a code-optimized model
+ollama pull qwen2.5-coder:latest
+
+# Configure roborev to use Ollama
+echo 'default_agent = "ollama"' >> ~/.roborev/config.toml
+```
+
+**Configuration:**
+```toml
+# Global config (~/.roborev/config.toml)
+default_agent = "ollama"
+default_model = "qwen2.5-coder:latest"
+ollama_base_url = "http://localhost:11434"  # Optional, uses OLLAMA_HOST env var or default
+
+# Per-repo config (.roborev.toml)
+agent = "ollama"
+model = "llama3:70b"  # Override model for this repo
+```
+
+**Recommended models:**
+- `qwen2.5-coder:latest` - Best for code, supports tool syntax (default)
+- `deepseek-coder:latest` - Excellent code understanding
+- `llama3:70b` - High quality, needs more RAM
+- `mistral:latest` - Fast, general-purpose
+
+List installed models: `ollama list`
+Find more models: [ollama.ai/library](https://ollama.ai/library)
 
 ## Documentation
 
