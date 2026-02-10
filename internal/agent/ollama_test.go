@@ -69,9 +69,19 @@ func TestOllamaAgent_WithAgentic(t *testing.T) {
 	}
 }
 
+// ollamaHealthHandler serves the /api/tags health check endpoint
+func ollamaHealthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(200)
+	w.Write([]byte(`{"models":[]}`))
+}
+
 func TestOllamaAgent_Review_Success(t *testing.T) {
 	// Create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		if r.URL.Path != "/api/chat" {
 			t.Errorf("Expected path /api/chat, got %s", r.URL.Path)
 		}
@@ -108,6 +118,10 @@ func TestOllamaAgent_Review_Success(t *testing.T) {
 
 func TestOllamaAgent_Review_ModelNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		w.WriteHeader(404)
 		w.Write([]byte(`{"error":"model not found"}`))
 	}))
@@ -172,6 +186,10 @@ func TestOllamaAgent_Review_Timeout(t *testing.T) {
 
 func TestOllamaAgent_Review_EmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		w.WriteHeader(200)
 		// Send done=true with no response text
 		w.Write([]byte(`{"message":{"role":"assistant","content":""},"done":true}` + "\n"))
@@ -191,6 +209,10 @@ func TestOllamaAgent_Review_EmptyResponse(t *testing.T) {
 
 func TestOllamaAgent_Review_MalformedJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		w.WriteHeader(200)
 		// Send mix of valid and invalid JSON
 		w.Write([]byte(`{"message":{"role":"assistant","content":"Good "},"done":false}` + "\n"))
@@ -215,6 +237,10 @@ func TestOllamaAgent_Review_MalformedJSON(t *testing.T) {
 
 func TestOllamaAgent_Review_StreamingOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		w.WriteHeader(200)
 		w.Write([]byte(`{"message":{"role":"assistant","content":"chunk1 "},"done":false}` + "\n"))
 		w.Write([]byte(`{"message":{"role":"assistant","content":"chunk2"},"done":false}` + "\n"))
@@ -354,6 +380,10 @@ func TestOllamaAgent_checkHealth(t *testing.T) {
 func TestOllamaAgent_Integration_FullReview(t *testing.T) {
 	// Simulate a complete review with multi-line streaming response
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		w.WriteHeader(200)
 		// Multi-line response simulating a real review
 		responses := []string{
@@ -443,6 +473,10 @@ func TestOllamaAgent_Integration_AgenticMode(t *testing.T) {
 	// Verify that agentic mode properly augments prompts and gets sent to server
 	var receivedPrompt string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		// Capture the request to verify prompt augmentation
 		var reqData ollamaChatRequest
 		json.NewDecoder(r.Body).Decode(&reqData)
@@ -494,6 +528,10 @@ func TestOllamaAgent_Integration_StreamingOutput(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			ollamaHealthHandler(w, r)
+			return
+		}
 		w.WriteHeader(200)
 		chunks := []string{"First ", "Second ", "Third"}
 		for _, chunk := range chunks {

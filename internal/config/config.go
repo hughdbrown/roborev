@@ -382,6 +382,12 @@ type RepoConfig struct {
 	MaxPromptSize int `toml:"max_prompt_size"` // Max prompt size in bytes before falling back to paths (overrides global default)
 }
 
+// GetOllamaBaseURL returns the configured Ollama base URL.
+// Implements the interface expected by agent.ResolveOllamaBaseURL.
+func (c *Config) GetOllamaBaseURL() string {
+	return c.OllamaBaseURL
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"os"
 	"testing"
 )
 
@@ -16,8 +15,7 @@ func (m *mockConfig) GetOllamaBaseURL() string {
 
 func TestResolveOllamaBaseURL_ConfigTOML(t *testing.T) {
 	cfg := &mockConfig{ollamaBaseURL: "http://config:8080"}
-	os.Setenv("OLLAMA_HOST", "http://env:9999")
-	defer os.Unsetenv("OLLAMA_HOST")
+	t.Setenv("OLLAMA_HOST", "http://env:9999")
 
 	url := ResolveOllamaBaseURL(cfg)
 	expected := "http://config:8080"
@@ -28,8 +26,7 @@ func TestResolveOllamaBaseURL_ConfigTOML(t *testing.T) {
 
 func TestResolveOllamaBaseURL_EnvVar(t *testing.T) {
 	cfg := &mockConfig{ollamaBaseURL: ""}
-	os.Setenv("OLLAMA_HOST", "http://env:9999")
-	defer os.Unsetenv("OLLAMA_HOST")
+	t.Setenv("OLLAMA_HOST", "http://env:9999")
 
 	url := ResolveOllamaBaseURL(cfg)
 	expected := "http://env:9999"
@@ -40,7 +37,7 @@ func TestResolveOllamaBaseURL_EnvVar(t *testing.T) {
 
 func TestResolveOllamaBaseURL_Default(t *testing.T) {
 	cfg := &mockConfig{ollamaBaseURL: ""}
-	os.Unsetenv("OLLAMA_HOST")
+	t.Setenv("OLLAMA_HOST", "")
 
 	url := ResolveOllamaBaseURL(cfg)
 	expected := "http://localhost:11434"
@@ -50,8 +47,7 @@ func TestResolveOllamaBaseURL_Default(t *testing.T) {
 }
 
 func TestResolveOllamaBaseURL_NilConfig(t *testing.T) {
-	os.Setenv("OLLAMA_HOST", "http://env:9999")
-	defer os.Unsetenv("OLLAMA_HOST")
+	t.Setenv("OLLAMA_HOST", "http://env:9999")
 
 	url := ResolveOllamaBaseURL(nil)
 	expected := "http://env:9999"
@@ -63,8 +59,7 @@ func TestResolveOllamaBaseURL_NilConfig(t *testing.T) {
 func TestResolveOllamaBaseURL_Priority(t *testing.T) {
 	// All sources set - config should win
 	cfg := &mockConfig{ollamaBaseURL: "http://config:7777"}
-	os.Setenv("OLLAMA_HOST", "http://env:8888")
-	defer os.Unsetenv("OLLAMA_HOST")
+	t.Setenv("OLLAMA_HOST", "http://env:8888")
 
 	url := ResolveOllamaBaseURL(cfg)
 	expected := "http://config:7777"
@@ -81,6 +76,8 @@ func TestValidateOllamaModel_Valid(t *testing.T) {
 		"deepseek-coder:6.7b",
 		"codellama:13b-python",
 		"phi3:mini",
+		"library/llama3:latest",
+		"myorg/mymodel:v1",
 	}
 
 	for _, model := range validModels {
@@ -97,7 +94,7 @@ func TestValidateOllamaModel_Invalid(t *testing.T) {
 	}{
 		{"", true},                     // empty
 		{"model with spaces", true},    // spaces
-		{"model/with/slash", true},     // slash
+		{"model/with/slash", false},    // slashes allowed for namespaced models
 		{"model@version", true},        // @ symbol
 		{"llama3:latest", false},       // valid
 		{"model_name-v1.0:tag", false}, // valid with multiple special chars

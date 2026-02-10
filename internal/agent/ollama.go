@@ -153,7 +153,8 @@ func (a *OllamaAgent) checkHealth(ctx context.Context) error {
 		return fmt.Errorf("create health check request: %w", err)
 	}
 
-	client := a.getHTTPClient()
+	// Use a dedicated client with short timeout for health checks
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return a.classifyError(err, 0, "")
@@ -169,6 +170,11 @@ func (a *OllamaAgent) checkHealth(ctx context.Context) error {
 
 // Review runs a code review and returns the output
 func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
+	// Fast-fail: check that the Ollama server is reachable
+	if err := a.checkHealth(ctx); err != nil {
+		return "", err
+	}
+
 	// Augment prompt for agentic mode if enabled
 	prompt = a.augmentPromptForAgentic(prompt)
 
@@ -295,13 +301,13 @@ func validateOllamaModel(model string) error {
 	if model == "" {
 		return fmt.Errorf("model name cannot be empty")
 	}
-	// Ollama model names are alphanumeric with optional : - _ . characters
-	// Examples: llama3, qwen2.5-coder:latest, mistral:7b-instruct
+	// Ollama model names are alphanumeric with optional : - _ . / characters
+	// Examples: llama3, qwen2.5-coder:latest, mistral:7b-instruct, library/llama3:latest
 	for i, r := range model {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			continue
 		}
-		if r == ':' || r == '-' || r == '_' || r == '.' {
+		if r == ':' || r == '-' || r == '_' || r == '.' || r == '/' {
 			continue
 		}
 		return fmt.Errorf("invalid model name %q: contains invalid character %q at position %d", model, r, i)
