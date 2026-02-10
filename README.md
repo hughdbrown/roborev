@@ -232,6 +232,11 @@ model = "llama3:70b"  # Override model for this repo
 List installed models: `ollama list`
 Find more models: [ollama.ai/library](https://ollama.ai/library)
 
+**Troubleshooting:**
+- **"Server not reachable"**: Check that Ollama is running with `ollama serve`
+- **"Model not found"**: Pull the model first with `ollama pull <model-name>`
+- **Performance tips**: Use smaller models for faster reviews (e.g., `:7b` variants instead of `:70b`)
+
 ## Documentation
 
 Full documentation available at **[roborev.io](https://roborev.io)**:
