@@ -293,6 +293,59 @@ func TestOllamaAgent_augmentPromptForAgentic(t *testing.T) {
 	}
 }
 
+func TestOllamaAgent_checkHealth(t *testing.T) {
+	t.Run("healthy server", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/tags" {
+				t.Errorf("Expected path /api/tags, got %s", r.URL.Path)
+			}
+			if r.Method != "GET" {
+				t.Errorf("Expected GET, got %s", r.Method)
+			}
+			w.WriteHeader(200)
+			w.Write([]byte(`{"models":[]}`))
+		}))
+		defer server.Close()
+
+		agent := NewOllamaAgent(server.URL)
+		err := agent.checkHealth(context.Background())
+		if err != nil {
+			t.Errorf("checkHealth() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("server unreachable", func(t *testing.T) {
+		agent := NewOllamaAgent("http://localhost:1")
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
+		err := agent.checkHealth(ctx)
+		if err == nil {
+			t.Error("checkHealth() should return error for unreachable server")
+		}
+		if !strings.Contains(err.Error(), "not reachable") && !strings.Contains(err.Error(), "connection refused") {
+			t.Errorf("checkHealth() error should mention connection issue, got: %s", err.Error())
+		}
+	})
+
+	t.Run("server returns non-200", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(503)
+			w.Write([]byte(`{"error":"service unavailable"}`))
+		}))
+		defer server.Close()
+
+		agent := NewOllamaAgent(server.URL)
+		err := agent.checkHealth(context.Background())
+		if err == nil {
+			t.Error("checkHealth() should return error for non-200 status")
+		}
+		if !strings.Contains(err.Error(), "503") && !strings.Contains(err.Error(), "health check failed") {
+			t.Errorf("checkHealth() error should mention status code, got: %s", err.Error())
+		}
+	})
+}
+
 func TestOllamaAgent_buildRequest(t *testing.T) {
 	tests := []struct {
 		name      string

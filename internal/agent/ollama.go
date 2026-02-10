@@ -139,6 +139,34 @@ func (a *OllamaAgent) getHTTPClient() *http.Client {
 	}
 }
 
+// checkHealth verifies that the Ollama server is reachable and responding.
+// Returns nil if the server is healthy, or a descriptive error otherwise.
+func (a *OllamaAgent) checkHealth(ctx context.Context) error {
+	// Create context with timeout to avoid hanging
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Make GET request to /api/tags endpoint
+	url := a.BaseURL + "/api/tags"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("create health check request: %w", err)
+	}
+
+	client := a.getHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return a.classifyError(err, 0, "")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("ollama server health check failed with status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
 // Review runs a code review and returns the output
 func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
 	// Augment prompt for agentic mode if enabled
