@@ -102,6 +102,33 @@ func (a *OllamaAgent) buildRequest(prompt string) ollamaChatRequest {
 	}
 }
 
+// augmentPromptForAgentic modifies the prompt to include tool descriptions when agentic mode is enabled.
+// Note: Tool support depends on the model. Models like Qwen 2.5+ understand this syntax.
+func (a *OllamaAgent) augmentPromptForAgentic(prompt string) string {
+	if !a.Agentic {
+		return prompt
+	}
+
+	// Append tool descriptions in a format that models like Qwen understand
+	toolDescriptions := `
+
+You have access to the following tools:
+
+1. read_file(path: string) -> string
+   Read the contents of a file at the given path.
+
+2. write_file(path: string, content: string) -> void
+   Write content to a file at the given path.
+
+3. run_command(command: string) -> string
+   Execute a shell command and return its output.
+
+When you need to use a tool, describe your intention clearly.
+`
+
+	return prompt + toolDescriptions
+}
+
 // getHTTPClient returns the HTTP client for requests
 func (a *OllamaAgent) getHTTPClient() *http.Client {
 	if a.HTTPClient != nil {
@@ -114,6 +141,9 @@ func (a *OllamaAgent) getHTTPClient() *http.Client {
 
 // Review runs a code review and returns the output
 func (a *OllamaAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
+	// Augment prompt for agentic mode if enabled
+	prompt = a.augmentPromptForAgentic(prompt)
+
 	// Build the request
 	reqData := a.buildRequest(prompt)
 

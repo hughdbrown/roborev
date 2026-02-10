@@ -239,6 +239,60 @@ func TestOllamaAgent_Review_StreamingOutput(t *testing.T) {
 	}
 }
 
+func TestOllamaAgent_augmentPromptForAgentic(t *testing.T) {
+	tests := []struct {
+		name     string
+		agentic  bool
+		prompt   string
+		contains []string
+	}{
+		{
+			name:     "agentic disabled returns prompt unchanged",
+			agentic:  false,
+			prompt:   "Review this code",
+			contains: []string{"Review this code"},
+		},
+		{
+			name:    "agentic enabled adds tool descriptions",
+			agentic: true,
+			prompt:  "Review this code",
+			contains: []string{
+				"Review this code",
+				"read_file",
+				"write_file",
+				"run_command",
+				"You have access to the following tools",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &OllamaAgent{
+				Agentic: tt.agentic,
+			}
+			result := agent.augmentPromptForAgentic(tt.prompt)
+
+			// Check that result contains all expected strings
+			for _, expected := range tt.contains {
+				if !strings.Contains(result, expected) {
+					t.Errorf("augmentPromptForAgentic() result missing %q", expected)
+				}
+			}
+
+			// If agentic disabled, result should be exactly the prompt
+			if !tt.agentic && result != tt.prompt {
+				t.Errorf("augmentPromptForAgentic() with agentic=false should return prompt unchanged, got %q", result)
+			}
+
+			// If agentic enabled, result should be longer than original prompt
+			if tt.agentic && len(result) <= len(tt.prompt) {
+				t.Errorf("augmentPromptForAgentic() with agentic=true should augment prompt, but result is not longer")
+			}
+		})
+	}
+}
+
 func TestOllamaAgent_buildRequest(t *testing.T) {
 	tests := []struct {
 		name      string
