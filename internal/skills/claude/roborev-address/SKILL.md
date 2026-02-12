@@ -50,7 +50,7 @@ The JSON output has this structure:
 
 ### 4. Fix the findings
 
-Use `job.git_ref` to understand the scope — run `git show <git_ref>` to see the original changes that were reviewed.
+Use `job.git_ref` to understand the scope. If `git_ref` is not `"dirty"`, run `git show <git_ref>` to see the original changes that were reviewed. If it is `"dirty"`, the review was for uncommitted changes and there is no commit to inspect.
 
 Parse the findings from the `output` field (severity, file paths, line numbers), then:
 
