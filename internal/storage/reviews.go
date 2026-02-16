@@ -2,6 +2,8 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -268,6 +270,135 @@ func (db *DB) MarkReviewAddressedByJobID(jobID int64, addressed bool) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// GetJobsWithReviewsByIDs fetches jobs and their reviews in batch for the given job IDs.
+// Returns a map of job ID to JobWithReview. Jobs without reviews are included with a nil Review.
+func (db *DB) GetJobsWithReviewsByIDs(jobIDs []int64) (map[int64]JobWithReview, error) {
+	if len(jobIDs) == 0 {
+		return nil, nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(jobIDs))
+	args := make([]interface{}, len(jobIDs))
+	for i, id := range jobIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Fetch jobs
+	// Note: The IN clause is built dynamically, but this is safe from SQL injection.
+	// The `placeholders` slice contains only "?" characters, and the `args` slice
+	// contains the integer IDs, which are passed to the DB driver for parameterization.
+	// This prevents user-controlled input from being part of the SQL query string itself.
+	jobQuery := fmt.Sprintf(`
+		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.agent, j.reasoning, j.status, j.enqueued_at,
+		       j.started_at, j.finished_at, j.worker_id, j.error, COALESCE(j.agentic, 0),
+		       r.root_path, r.name, c.subject, j.model, j.job_type, j.review_type
+		FROM review_jobs j
+		JOIN repos r ON r.id = j.repo_id
+		LEFT JOIN commits c ON c.id = j.commit_id
+		WHERE j.id IN (%s)
+	`, inClause)
+
+	rows, err := db.Query(jobQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query jobs: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]JobWithReview, len(jobIDs))
+	for rows.Next() {
+		var j ReviewJob
+		var enqueuedAt string
+		var startedAt, finishedAt, workerID, errMsg sql.NullString
+		var commitID sql.NullInt64
+		var commitSubject sql.NullString
+		var agentic int
+		var model, branch, jobTypeStr, reviewTypeStr sql.NullString
+
+		if err := rows.Scan(&j.ID, &j.RepoID, &commitID, &j.GitRef, &branch, &j.Agent, &j.Reasoning, &j.Status, &enqueuedAt,
+			&startedAt, &finishedAt, &workerID, &errMsg, &agentic,
+			&j.RepoPath, &j.RepoName, &commitSubject, &model, &jobTypeStr, &reviewTypeStr); err != nil {
+			return nil, fmt.Errorf("scan job: %w", err)
+		}
+
+		j.EnqueuedAt = parseSQLiteTime(enqueuedAt)
+		if commitID.Valid {
+			j.CommitID = &commitID.Int64
+		}
+		if commitSubject.Valid {
+			j.CommitSubject = commitSubject.String
+		}
+		if model.Valid {
+			j.Model = model.String
+		}
+		if branch.Valid {
+			j.Branch = branch.String
+		}
+		if jobTypeStr.Valid {
+			j.JobType = jobTypeStr.String
+		}
+		if reviewTypeStr.Valid {
+			j.ReviewType = reviewTypeStr.String
+		}
+		if startedAt.Valid {
+			t := parseSQLiteTime(startedAt.String)
+			j.StartedAt = &t
+		}
+		if finishedAt.Valid {
+			t := parseSQLiteTime(finishedAt.String)
+			j.FinishedAt = &t
+		}
+		if workerID.Valid {
+			j.WorkerID = workerID.String
+		}
+		if errMsg.Valid {
+			j.Error = errMsg.String
+		}
+		j.Agentic = agentic != 0
+
+		result[j.ID] = JobWithReview{Job: j}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate jobs: %w", err)
+	}
+
+	// Fetch reviews for these jobs
+	reviewQuery := fmt.Sprintf(`
+		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed
+		FROM reviews rv
+		WHERE rv.job_id IN (%s)
+	`, inClause)
+
+	reviewRows, err := db.Query(reviewQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query reviews: %w", err)
+	}
+	defer reviewRows.Close()
+
+	for reviewRows.Next() {
+		var r Review
+		var createdAt string
+		var addressed int
+		if err := reviewRows.Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed); err != nil {
+			return nil, fmt.Errorf("scan review: %w", err)
+		}
+		r.CreatedAt = parseSQLiteTime(createdAt)
+		r.Addressed = addressed != 0
+
+		if entry, ok := result[r.JobID]; ok {
+			entry.Review = &r
+			result[r.JobID] = entry
+		}
+	}
+	if err := reviewRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reviews: %w", err)
+	}
+
+	return result, nil
 }
 
 // GetReviewByID finds a review by its ID

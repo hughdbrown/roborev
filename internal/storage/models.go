@@ -114,6 +114,12 @@ func (j ReviewJob) IsTaskJob() bool {
 	return true
 }
 
+// JobWithReview pairs a job with its review for batch operations
+type JobWithReview struct {
+	Job    ReviewJob `json:"job"`
+	Review *Review   `json:"review,omitempty"`
+}
+
 type Review struct {
 	ID        int64     `json:"id"`
 	JobID     int64     `json:"job_id"`

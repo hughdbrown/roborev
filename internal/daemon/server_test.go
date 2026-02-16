@@ -3164,3 +3164,106 @@ func TestHandleEnqueueRangeNonCommitObjectRejects(t *testing.T) {
 		t.Errorf("expected 'invalid start commit' error, got: %s", w.Body.String())
 	}
 }
+
+func TestHandleBatchJobs(t *testing.T) {
+	server, db, _ := newTestServer(t)
+
+	repo, err := db.GetOrCreateRepo("/tmp/repo", "")
+	if err != nil {
+		t.Fatalf("GetOrCreateRepo failed: %v", err)
+	}
+
+	// Job 1: with review
+	job1, err := db.EnqueueJob(storage.EnqueueOpts{RepoID: repo.ID, GitRef: "abc123", Agent: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE review_jobs SET status = 'running' WHERE id = ?`, job1.ID); err != nil {
+		t.Fatalf("failed to update job status: %v", err)
+	}
+	if err := db.CompleteJob(job1.ID, "test", "p1", "o1"); err != nil {
+		t.Fatalf("CompleteJob failed for job1: %v", err)
+	}
+
+	// Job 2: no review
+	job2, err := db.EnqueueJob(storage.EnqueueOpts{RepoID: repo.ID, GitRef: "def456", Agent: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonExistentJobID := int64(9999)
+
+	t.Run("fetches jobs with and without reviews", func(t *testing.T) {
+		reqBody := map[string][]int64{"job_ids": {job1.ID, job2.ID, nonExistentJobID}}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/jobs/batch", reqBody)
+		w := httptest.NewRecorder()
+
+		server.handleBatchJobs(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var resp struct {
+			Results map[int64]storage.JobWithReview `json:"results"`
+		}
+		testutil.DecodeJSON(t, w, &resp)
+
+		if len(resp.Results) != 2 {
+			t.Fatalf("Expected 2 results, got %d", len(resp.Results))
+		}
+
+		// Check job 1 (with review)
+		res1, ok := resp.Results[job1.ID]
+		if !ok {
+			t.Errorf("Result for job %d not found", job1.ID)
+		}
+		if res1.Review == nil {
+			t.Error("Expected review for job 1")
+		} else if res1.Review.Output != "o1" {
+			t.Errorf("Expected output 'o1', got %q", res1.Review.Output)
+		}
+
+		// Check job 2 (no review)
+		res2, ok := resp.Results[job2.ID]
+		if !ok {
+			t.Errorf("Result for job %d not found", job2.ID)
+		}
+		if res2.Review != nil {
+			t.Error("Expected nil review for job 2")
+		}
+	})
+
+	t.Run("wrong method fails", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs/batch", nil)
+		w := httptest.NewRecorder()
+		server.handleBatchJobs(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusMethodNotAllowed)
+	})
+
+	t.Run("empty job_ids fails", func(t *testing.T) {
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/jobs/batch", map[string][]int64{"job_ids": {}})
+		w := httptest.NewRecorder()
+		server.handleBatchJobs(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("missing job_ids fails", func(t *testing.T) {
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/jobs/batch", map[string]string{})
+		w := httptest.NewRecorder()
+		server.handleBatchJobs(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("batch size limit enforced", func(t *testing.T) {
+		ids := make([]int64, 101)
+		for i := range ids {
+			ids[i] = int64(i)
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/jobs/batch", map[string][]int64{"job_ids": ids})
+		w := httptest.NewRecorder()
+		server.handleBatchJobs(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusBadRequest)
+		if !strings.Contains(w.Body.String(), "too many job IDs") {
+			t.Errorf("Expected error message about batch size, got: %s", w.Body.String())
+		}
+	})
+}

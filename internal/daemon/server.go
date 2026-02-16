@@ -85,6 +85,7 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	mux.HandleFunc("/api/comments", s.handleListComments)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/stream/events", s.handleStreamEvents)
+	mux.HandleFunc("/api/jobs/batch", s.handleBatchJobs)
 	mux.HandleFunc("/api/sync/now", s.handleSyncNow)
 	mux.HandleFunc("/api/sync/status", s.handleSyncStatus)
 
@@ -232,6 +233,41 @@ func (s *Server) SetCIPoller(cp *CIPoller) {
 	cp.jobCancelFn = func(jobID int64) {
 		s.workerPool.CancelJob(jobID)
 	}
+}
+
+// handleBatchJobs fetches jobs and their reviews in a single request for the given job IDs
+func (s *Server) handleBatchJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		JobIDs []int64 `json:"job_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.JobIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "job_ids is required")
+		return
+	}
+
+	const maxBatchSize = 100
+	if len(req.JobIDs) > maxBatchSize {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many job IDs (max %d)", maxBatchSize))
+		return
+	}
+
+	results, err := s.db.GetJobsWithReviewsByIDs(req.JobIDs)
+	if err != nil {
+		s.writeInternalError(w, fmt.Sprintf("batch fetch: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"results": results})
 }
 
 // handleSyncNow triggers an immediate sync cycle

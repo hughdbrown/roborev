@@ -29,6 +29,7 @@ func compactCmd() *cobra.Command {
 		dryRun      bool
 		limit       int
 		wait        bool
+		timeout     time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -77,6 +78,7 @@ Examples:
 				dryRun:      dryRun,
 				limit:       limit,
 				wait:        wait,
+				timeout:     timeout,
 			})
 		},
 	}
@@ -90,6 +92,7 @@ Examples:
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be done without executing")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum number of jobs to compact at once")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for consolidation to complete and show result")
+	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "timeout for --wait mode (e.g., 15m, 1h); 0 or negative values use the 10m default")
 
 	return cmd
 }
@@ -104,6 +107,7 @@ type compactOptions struct {
 	dryRun      bool
 	limit       int
 	wait        bool
+	timeout     time.Duration
 }
 
 type jobReview struct {
@@ -112,43 +116,68 @@ type jobReview struct {
 	review *storage.Review
 }
 
-// fetchJobReviews fetches job and review data for all job IDs.
+// fetchJobReviews fetches job and review data for all job IDs in a single batch request.
 // Returns successfully fetched entries and list of IDs that were processed.
 func fetchJobReviews(ctx context.Context, jobIDs []int64, quiet bool, cmd *cobra.Command) ([]jobReview, []int64, error) {
+	if !quiet {
+		cmd.Printf("  Fetching %d job(s)... ", len(jobIDs))
+	}
+
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"job_ids": jobIDs,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal batch request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", serverAddr+"/api/jobs/batch", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, nil, fmt.Errorf("create batch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("batch fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("batch fetch failed (%d): %s", resp.StatusCode, body)
+	}
+
+	var batchResp struct {
+		Results map[int64]storage.JobWithReview `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		return nil, nil, fmt.Errorf("decode batch response: %w", err)
+	}
+
 	var jobReviews []jobReview
 	var successfulJobIDs []int64
 
-	for i, jobID := range jobIDs {
-		if !quiet {
-			cmd.Printf("  [%d/%d] Fetching job %d... ", i+1, len(jobIDs), jobID)
-		}
-
-		job, err := fetchJob(ctx, serverAddr, jobID)
-		if err != nil {
+	// Iterate in the original order to maintain deterministic output
+	for _, jobID := range jobIDs {
+		entry, ok := batchResp.Results[jobID]
+		if !ok || entry.Review == nil {
 			if !quiet {
-				cmd.Printf("failed: %v\n", err)
+				cmd.Printf("\n  Skipping job %d (no review found)", jobID)
 			}
 			continue
-		}
-
-		review, err := fetchReview(ctx, serverAddr, jobID)
-		if err != nil {
-			if !quiet {
-				cmd.Printf("failed: %v\n", err)
-			}
-			continue
-		}
-
-		if !quiet {
-			cmd.Printf("done\n")
 		}
 
 		successfulJobIDs = append(successfulJobIDs, jobID)
 		jobReviews = append(jobReviews, jobReview{
 			jobID:  jobID,
-			job:    job,
-			review: review,
+			job:    &entry.Job,
+			review: entry.Review,
 		})
+	}
+
+	if !quiet {
+		cmd.Printf("done (%d fetched)\n", len(jobReviews))
 	}
 
 	if len(jobReviews) == 0 {
@@ -197,7 +226,11 @@ func enqueueConsolidation(ctx context.Context, cmd *cobra.Command, repoRoot stri
 
 // waitForConsolidation waits for a consolidation job to complete and validates output.
 func waitForConsolidation(ctx context.Context, cmd *cobra.Command, jobID int64, opts compactOptions) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	timeout := opts.timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var output io.Writer
@@ -221,28 +254,6 @@ func waitForConsolidation(ctx context.Context, cmd *cobra.Command, jobID int64, 
 	}
 
 	return nil
-}
-
-// markJobsAsAddressed marks all jobs in the list as addressed.
-// Logs warnings for failures but continues processing remaining jobs.
-func markJobsAsAddressed(jobIDs []int64, quiet bool, cmd *cobra.Command) {
-	if !quiet {
-		cmd.Println("\nMarking original jobs as addressed:")
-	}
-
-	for i, jobID := range jobIDs {
-		if !quiet {
-			cmd.Printf("  [%d/%d] Marking job %d... ", i+1, len(jobIDs), jobID)
-		}
-
-		if err := markJobAddressed(serverAddr, jobID); err != nil {
-			if !quiet {
-				cmd.Printf("failed: %v\n", err)
-			}
-		} else if !quiet {
-			cmd.Printf("done\n")
-		}
-	}
 }
 
 // runCompact verifies and consolidates unaddressed review findings.
@@ -376,8 +387,8 @@ func runCompact(cmd *cobra.Command, opts compactOptions) error {
 		cmd.Printf("\nConsolidated review created: job %d\n", consolidatedJobID)
 	}
 
-	// Mark jobs as addressed (only those successfully processed)
-	markJobsAsAddressed(successfulJobIDs, opts.quiet, cmd)
+	// Note: source jobs are automatically marked as addressed by the daemon worker
+	// when the compact job completes (see worker.go markCompactSourceJobs).
 
 	// Show next steps
 	if !opts.quiet {
@@ -465,7 +476,7 @@ func enqueueCompactJob(repoRoot, prompt, outputPrefix, label, branch string, opt
 		branch = git.GetCurrentBranch(repoRoot)
 	}
 
-	reqBody, _ := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(map[string]interface{}{
 		"repo_path":     repoRoot,
 		"git_ref":       label,
 		"branch":        branch,
@@ -477,6 +488,9 @@ func enqueueCompactJob(repoRoot, prompt, outputPrefix, label, branch string, opt
 		"agentic":       true,
 		"job_type":      "compact",
 	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal enqueue request: %w", err)
+	}
 
 	resp, err := http.Post(serverAddr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -568,7 +582,10 @@ func extractJobIDs(reviews []jobReview) []int64 {
 
 // cancelJob cancels a job by ID via the daemon API
 func cancelJob(serverAddr string, jobID int64) error {
-	reqBody, _ := json.Marshal(map[string]interface{}{"job_id": jobID})
+	reqBody, err := json.Marshal(map[string]interface{}{"job_id": jobID})
+	if err != nil {
+		return fmt.Errorf("marshal cancel request: %w", err)
+	}
 	resp, err := http.Post(serverAddr+"/api/job/cancel", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
