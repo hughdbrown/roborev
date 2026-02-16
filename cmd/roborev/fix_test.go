@@ -461,7 +461,10 @@ func TestRunFixUnaddressed(t *testing.T) {
 		_ = os.Chdir(tmpDir)
 		defer func() { _ = os.Chdir(oldWd) }()
 
-		_ = runFixUnaddressed(cmd, "feature-branch", false, fixOptions{agentName: "test"})
+		err := runFixUnaddressed(cmd, "feature-branch", false, fixOptions{agentName: "test"})
+		if err != nil {
+			t.Fatalf("runFixUnaddressed returned unexpected error: %v", err)
+		}
 		if gotBranch != "feature-branch" {
 			t.Errorf("expected branch=feature-branch, got %q", gotBranch)
 		}

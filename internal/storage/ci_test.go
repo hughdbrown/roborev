@@ -259,7 +259,6 @@ func TestIncrementBatchConcurrent(t *testing.T) {
 	wg.Wait()
 
 	// Verify final count
-	final, _ := db.GetCIBatchByJobID(0)
 	// Can't use GetCIBatchByJobID with 0, read directly
 	var finalBatch CIPRBatch
 	var synthesized int
@@ -268,7 +267,6 @@ func TestIncrementBatchConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query final batch: %v", err)
 	}
-	_ = final
 	if finalBatch.CompletedJobs != n {
 		t.Errorf("got CompletedJobs=%d, want %d", finalBatch.CompletedJobs, n)
 	}
