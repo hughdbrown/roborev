@@ -348,16 +348,16 @@ func killAllDaemons() {
 	if runtime.GOOS == "windows" {
 		// On Windows, use wmic to find daemon processes by command line
 		// and kill only those running "daemon run"
-		exec.Command("wmic", "process", "where",
+		_ = exec.Command("wmic", "process", "where",
 			"commandline like '%roborev%daemon%run%'",
 			"call", "terminate").Run()
 	} else {
 		// On Unix, use pkill to kill all roborev daemon processes
 		// Use -f to match against full command line
-		exec.Command("pkill", "-f", "roborev daemon run").Run()
+		_ = exec.Command("pkill", "-f", "roborev daemon run").Run()
 		time.Sleep(100 * time.Millisecond)
 		// Force kill any remaining
-		exec.Command("pkill", "-9", "-f", "roborev daemon run").Run()
+		_ = exec.Command("pkill", "-9", "-f", "roborev daemon run").Run()
 	}
 	time.Sleep(200 * time.Millisecond)
 }
@@ -1036,7 +1036,7 @@ Examples:
 			}
 
 			var job storage.ReviewJob
-			json.Unmarshal(body, &job)
+			_ = json.Unmarshal(body, &job)
 
 			if !quiet {
 				if dirty {
@@ -2707,7 +2707,7 @@ official release over a dev build.`,
 			if !yes {
 				fmt.Print("\nProceed with update? [y/N] ")
 				var response string
-				fmt.Scanln(&response)
+				_, _ = fmt.Scanln(&response)
 				if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
 					fmt.Println("Update cancelled")
 					return nil

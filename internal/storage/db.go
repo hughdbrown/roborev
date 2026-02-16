@@ -289,7 +289,7 @@ func (db *DB) migrate() error {
 		}
 		// Ensure FKs are re-enabled even if we return early due to error
 		// This prevents returning a connection to the pool with FKs disabled
-		defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+		defer func() { _, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`) }()
 
 		// Recreate table with updated constraint in a transaction for safety
 		tx, err := conn.BeginTx(ctx, nil)
@@ -330,7 +330,7 @@ func (db *DB) migrate() error {
 		if checkErr == nil {
 			for checkRows.Next() {
 				var colName string
-				checkRows.Scan(&colName)
+				_ = checkRows.Scan(&colName)
 				switch colName {
 				case "diff_content":
 					hasDiffContent = true
@@ -446,7 +446,7 @@ func (db *DB) migrate() error {
 		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 			return fmt.Errorf("disable foreign keys: %w", err)
 		}
-		defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+		defer func() { _, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`) }()
 
 		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
@@ -460,7 +460,7 @@ func (db *DB) migrate() error {
 		if checkRows != nil {
 			if checkRows.Next() {
 				var cnt int
-				checkRows.Scan(&cnt)
+				_ = checkRows.Scan(&cnt)
 				hasJobID = cnt > 0
 			}
 			checkRows.Close()
@@ -842,7 +842,7 @@ func (db *DB) migrateSyncColumns() error {
 		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 			return fmt.Errorf("disable foreign keys for commits: %w", err)
 		}
-		defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+		defer func() { _, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`) }()
 
 		// Run rebuild in a transaction for atomicity
 		tx, err := conn.BeginTx(ctx, nil)

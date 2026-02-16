@@ -326,7 +326,7 @@ func TestWaitForAnalysisJob_Timeout(t *testing.T) {
 			ID:     42,
 			Status: storage.JobStatusQueued,
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"jobs": []storage.ReviewJob{job}})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"jobs": []storage.ReviewJob{job}})
 	}))
 	defer ts.Close()
 
@@ -340,13 +340,6 @@ func TestWaitForAnalysisJob_Timeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Errorf("expected context deadline error, got: %v", err)
 	}
-}
-
-type jobResponse struct {
-	status   string
-	review   string
-	errMsg   string
-	notFound bool
 }
 
 func TestMarkJobAddressed(t *testing.T) {
@@ -374,7 +367,7 @@ func TestMarkJobAddressed(t *testing.T) {
 				}
 
 				var req map[string]interface{}
-				json.NewDecoder(r.Body).Decode(&req)
+				_ = json.NewDecoder(r.Body).Decode(&req)
 				gotJobID = int64(req["job_id"].(float64))
 				gotAddressed = req["addressed"].(bool)
 
@@ -406,7 +399,9 @@ func TestMarkJobAddressed(t *testing.T) {
 
 func TestRunFixAgent(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 
 	cmd, output := newTestCmd(t)
 
@@ -579,7 +574,7 @@ func TestEnqueueAnalysisJob(t *testing.T) {
 		JobIDStart: 42,
 		OnEnqueue: func(w http.ResponseWriter, r *http.Request) {
 			var req map[string]interface{}
-			json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewDecoder(r.Body).Decode(&req)
 
 			if req["agentic"] != true {
 				t.Error("agentic should be true for analysis")
@@ -589,7 +584,7 @@ func TestEnqueueAnalysisJob(t *testing.T) {
 			}
 
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(storage.ReviewJob{
+			_ = json.NewEncoder(w).Encode(storage.ReviewJob{
 				ID:     42,
 				Agent:  "test",
 				Status: storage.JobStatusQueued,
@@ -620,10 +615,10 @@ func TestEnqueueAnalysisJobBranchName(t *testing.T) {
 		ts, _ := newMockServer(t, MockServerOpts{
 			OnEnqueue: func(w http.ResponseWriter, r *http.Request) {
 				var req map[string]interface{}
-				json.NewDecoder(r.Body).Decode(&req)
+				_ = json.NewDecoder(r.Body).Decode(&req)
 				branch, _ = req["branch"].(string)
 				w.WriteHeader(http.StatusCreated)
-				json.NewEncoder(w).Encode(storage.ReviewJob{ID: 1, Agent: "test", Status: storage.JobStatusQueued})
+				_ = json.NewEncoder(w).Encode(storage.ReviewJob{ID: 1, Agent: "test", Status: storage.JobStatusQueued})
 			},
 		})
 		patchServerAddr(t, ts.URL)
@@ -697,7 +692,7 @@ func TestGetBranchFiles(t *testing.T) {
 
 	t.Run("reads from git not working tree", func(t *testing.T) {
 		// Modify working tree — should NOT affect branch analysis
-		os.WriteFile(filepath.Join(repo.Dir, "new.go"), []byte("DIRTY"), 0644)
+		_ = os.WriteFile(filepath.Join(repo.Dir, "new.go"), []byte("DIRTY"), 0644)
 		defer func() {
 			repo.Run("checkout", "new.go")
 		}()

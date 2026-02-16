@@ -305,7 +305,7 @@ func TestFindJobForCommit(t *testing.T) {
 		repoDir := t.TempDir()
 		_, cleanup := setupMockDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("not json"))
+			_, _ = w.Write([]byte("not json"))
 		}))
 		defer cleanup()
 

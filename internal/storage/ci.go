@@ -169,7 +169,7 @@ func (db *DB) IncrementBatchCompleted(batchID int64) (*CIPRBatch, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// BEGIN IMMEDIATE is not directly available via database/sql, but SQLite WAL + busy_timeout
 	// handles contention. The UPDATE + SELECT in a single tx is atomic enough.
@@ -199,7 +199,7 @@ func (db *DB) IncrementBatchFailed(batchID int64) (*CIPRBatch, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.Exec(`UPDATE ci_pr_batches SET failed_jobs = failed_jobs + 1 WHERE id = ?`, batchID)
 	if err != nil {
@@ -420,7 +420,7 @@ func (db *DB) ReconcileBatch(batchID int64) (*CIPRBatch, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Count actual terminal statuses from linked jobs
 	var completed, failed int

@@ -322,7 +322,7 @@ Examples:
 				}
 				fmt.Print("\nProceed? [y/N] ")
 				var response string
-				fmt.Scanln(&response)
+				_, _ = fmt.Scanln(&response)
 				if response != "y" && response != "Y" && response != "yes" {
 					fmt.Println("Cancelled")
 					return nil
@@ -435,7 +435,7 @@ Examples:
 					sourceStats.TotalJobs, target.Name, source.Name)
 				fmt.Print("\nProceed? [y/N] ")
 				var response string
-				fmt.Scanln(&response)
+				_, _ = fmt.Scanln(&response)
 				if response != "y" && response != "Y" && response != "yes" {
 					fmt.Println("Cancelled")
 					return nil

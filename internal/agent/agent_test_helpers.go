@@ -263,27 +263,6 @@ func (b *ScriptBuilder) Build() string {
 	return strings.Join(b.lines, "\n") + "\n"
 }
 
-// assertArgsSequence verifies that the args slice contains the sequence of strings.
-func assertArgsSequence(t *testing.T, args []string, sequence ...string) {
-	t.Helper()
-	if len(sequence) == 0 {
-		return
-	}
-	for i := 0; i <= len(args)-len(sequence); i++ {
-		match := true
-		for j := 0; j < len(sequence); j++ {
-			if args[i+j] != sequence[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return
-		}
-	}
-	t.Errorf("expected sequence %v in args %v", sequence, args)
-}
-
 // FailingWriter always returns an error on Write.
 type FailingWriter struct {
 	Err error

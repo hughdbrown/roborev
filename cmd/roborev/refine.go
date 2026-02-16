@@ -555,7 +555,7 @@ func runRefine(opts refineOptions) error {
 		if git.IsWorkingTreeClean(worktreePath) {
 			cleanupWorktree()
 			fmt.Println("Agent made no changes - skipping this review")
-			client.AddComment(currentFailedReview.JobID, "roborev-refine", "Agent could not determine how to address findings")
+			_ = client.AddComment(currentFailedReview.JobID, "roborev-refine", "Agent could not determine how to address findings")
 			skippedReviews[currentFailedReview.ID] = true
 			currentFailedReview = nil
 			continue
@@ -577,7 +577,7 @@ func runRefine(opts refineOptions) error {
 
 		// Add response recording what was done
 		responseText := fmt.Sprintf("Created commit %s to address findings\n\n%s", shortSHA(newCommit), output)
-		client.AddComment(currentFailedReview.JobID, "roborev-refine", responseText)
+		_ = client.AddComment(currentFailedReview.JobID, "roborev-refine", responseText)
 
 		// Mark old review as addressed
 		if err := client.MarkReviewAddressed(currentFailedReview.JobID); err != nil {

@@ -40,7 +40,7 @@ func TestResolveRepoIdentifier(t *testing.T) {
 		if err := os.Chmod(orgDir, 0000); err != nil {
 			t.Fatalf("Failed to chmod: %v", err)
 		}
-		defer os.Chmod(orgDir, 0755)
+		defer func() { _ = os.Chmod(orgDir, 0755) }()
 
 		chdir(t, tmpDir)
 

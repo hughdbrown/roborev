@@ -396,7 +396,7 @@ func TestInitNoDaemon_ServerError(t *testing.T) {
 	// Spin up a test server that returns 500
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte("database locked"))
+		_, _ = w.Write([]byte("database locked"))
 	}))
 	defer ts.Close()
 

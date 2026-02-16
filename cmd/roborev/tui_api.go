@@ -83,7 +83,7 @@ func (m tuiModel) postJSON(path string, in any, out any) error {
 			return fmt.Errorf("decode response: %w", err)
 		}
 	} else {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 	return nil
 }

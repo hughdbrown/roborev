@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -528,7 +527,7 @@ func TestFormatMapCollidingKeys(t *testing.T) {
 
 	// Verify exact expected output: keys sorted by %#v tie-breaker
 	// collidingKey(1) < collidingKey(2) < collidingKey(3) by %#v
-	want := fmt.Sprintf("same:alpha,same:bravo,same:charlie")
+	want := "same:alpha,same:bravo,same:charlie"
 	if result != want {
 		t.Errorf("formatMap = %q, want %q", result, want)
 	}

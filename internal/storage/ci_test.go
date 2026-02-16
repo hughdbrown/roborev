@@ -259,7 +259,7 @@ func TestIncrementBatchConcurrent(t *testing.T) {
 	wg.Wait()
 
 	// Verify final count
-	final, err := db.GetCIBatchByJobID(0)
+	final, _ := db.GetCIBatchByJobID(0)
 	// Can't use GetCIBatchByJobID with 0, read directly
 	var finalBatch CIPRBatch
 	var synthesized int
@@ -290,11 +290,11 @@ func TestGetBatchReviews(t *testing.T) {
 	mustRecordBatchJob(t, db, batch.ID, job2.ID)
 
 	// Complete job1 with a review
-	db.Exec(`UPDATE review_jobs SET status = 'done' WHERE id = ?`, job1.ID)
-	db.Exec(`INSERT INTO reviews (job_id, agent, prompt, output) VALUES (?, 'codex', 'test', 'finding1')`, job1.ID)
+	_, _ = db.Exec(`UPDATE review_jobs SET status = 'done' WHERE id = ?`, job1.ID)
+	_, _ = db.Exec(`INSERT INTO reviews (job_id, agent, prompt, output) VALUES (?, 'codex', 'test', 'finding1')`, job1.ID)
 
 	// Fail job2
-	db.Exec(`UPDATE review_jobs SET status = 'failed', error = 'timeout' WHERE id = ?`, job2.ID)
+	_, _ = db.Exec(`UPDATE review_jobs SET status = 'failed', error = 'timeout' WHERE id = ?`, job2.ID)
 
 	reviews, err := db.GetBatchReviews(batch.ID)
 	if err != nil {
@@ -478,7 +478,7 @@ func TestGetStaleBatches_StaleClaim(t *testing.T) {
 	batch, _ := mustCreateLinkedTerminalJob(t, db, repo.ID, "myorg/myrepo", 1, "sha1", "sha1", "test", "security", "done")
 
 	// Claim the batch, then backdate claimed_at to simulate a stale claim
-	db.ClaimBatchForSynthesis(batch.ID)
+	_, _ = db.ClaimBatchForSynthesis(batch.ID)
 	_, err = db.Exec(`UPDATE ci_pr_batches SET claimed_at = datetime('now', '-10 minutes') WHERE id = ?`, batch.ID)
 	if err != nil {
 		t.Fatal(err)

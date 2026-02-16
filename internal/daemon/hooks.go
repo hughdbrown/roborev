@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/roborev-dev/roborev/internal/config"
 )
@@ -17,7 +16,6 @@ type HookRunner struct {
 	cfgGetter   ConfigGetter
 	broadcaster Broadcaster
 	subID       int
-	mu          sync.RWMutex
 	stopCh      chan struct{}
 }
 

@@ -361,8 +361,8 @@ func TestRunFixUnaddressed(t *testing.T) {
 		cmd.SetOut(&output)
 
 		oldWd, _ := os.Getwd()
-		os.Chdir(tmpDir)
-		defer os.Chdir(oldWd)
+		_ = os.Chdir(tmpDir)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err := runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test"})
 		if err != nil {
@@ -422,8 +422,8 @@ func TestRunFixUnaddressed(t *testing.T) {
 		cmd.SetOut(&output)
 
 		oldWd, _ := os.Getwd()
-		os.Chdir(tmpDir)
-		defer os.Chdir(oldWd)
+		_ = os.Chdir(tmpDir)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err := runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 		if err != nil {
@@ -458,10 +458,10 @@ func TestRunFixUnaddressed(t *testing.T) {
 		cmd.SetOut(&output)
 
 		oldWd, _ := os.Getwd()
-		os.Chdir(tmpDir)
-		defer os.Chdir(oldWd)
+		_ = os.Chdir(tmpDir)
+		defer func() { _ = os.Chdir(oldWd) }()
 
-		runFixUnaddressed(cmd, "feature-branch", false, fixOptions{agentName: "test"})
+		_ = runFixUnaddressed(cmd, "feature-branch", false, fixOptions{agentName: "test"})
 		if gotBranch != "feature-branch" {
 			t.Errorf("expected branch=feature-branch, got %q", gotBranch)
 		}
@@ -471,7 +471,7 @@ func TestRunFixUnaddressed(t *testing.T) {
 		_, cleanup := setupMockDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/jobs" {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte("db error"))
+				_, _ = w.Write([]byte("db error"))
 			}
 		}))
 		defer cleanup()
@@ -481,8 +481,8 @@ func TestRunFixUnaddressed(t *testing.T) {
 		cmd.SetOut(&output)
 
 		oldWd, _ := os.Getwd()
-		os.Chdir(tmpDir)
-		defer os.Chdir(oldWd)
+		_ = os.Chdir(tmpDir)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err := runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test"})
 		if err == nil {
@@ -550,8 +550,8 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 		cmd.SetOut(&output)
 
 		oldWd, _ := os.Getwd()
-		os.Chdir(tmpDir)
-		defer os.Chdir(oldWd)
+		_ = os.Chdir(tmpDir)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err := runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 		if err != nil {
@@ -572,8 +572,8 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 		cmd.SetOut(&output)
 
 		oldWd, _ := os.Getwd()
-		os.Chdir(tmpDir)
-		defer os.Chdir(oldWd)
+		_ = os.Chdir(tmpDir)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err := runFixUnaddressed(cmd, "", true, fixOptions{agentName: "test", reasoning: "fast"})
 		if err != nil {
@@ -646,8 +646,8 @@ func TestRunFixUnaddressedRequery(t *testing.T) {
 	cmd.SetOut(&output)
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	err := runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 	if err != nil {
@@ -679,15 +679,15 @@ func initTestGitRepo(t *testing.T) string {
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = tmpDir
-		cmd.Run()
+		_ = cmd.Run()
 	}
-	os.WriteFile(filepath.Join(tmpDir, "f.txt"), []byte("x"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "f.txt"), []byte("x"), 0644)
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = tmpDir
-	cmd.Run()
+	_ = cmd.Run()
 	cmd = exec.Command("git", "commit", "-m", "init")
 	cmd.Dir = tmpDir
-	cmd.Run()
+	_ = cmd.Run()
 	return tmpDir
 }
 
@@ -1114,7 +1114,7 @@ func TestRunFixList(t *testing.T) {
 		if err := os.Chdir(tmpDir); err != nil {
 			t.Fatal(err)
 		}
-		defer os.Chdir(oldWd)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err = runFixList(cmd, "", false)
 		if err != nil {
@@ -1183,7 +1183,7 @@ func TestRunFixList(t *testing.T) {
 		if err := os.Chdir(tmpDir); err != nil {
 			t.Fatal(err)
 		}
-		defer os.Chdir(oldWd)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		err = runFixList(cmd, "", false)
 		if err != nil {
@@ -1213,7 +1213,7 @@ func TestRunFixList(t *testing.T) {
 					})
 				} else if q.Get("id") != "" {
 					var id int64
-					fmt.Sscanf(q.Get("id"), "%d", &id)
+					_, _ = fmt.Sscanf(q.Get("id"), "%d", &id)
 					gotIDs = append(gotIDs, id)
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"jobs": []storage.ReviewJob{
@@ -1239,7 +1239,7 @@ func TestRunFixList(t *testing.T) {
 		if err := os.Chdir(tmpDir); err != nil {
 			t.Fatal(err)
 		}
-		defer os.Chdir(oldWd)
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		// With newestFirst=true, should process in order: 30, 20, 10
 		gotIDs = nil

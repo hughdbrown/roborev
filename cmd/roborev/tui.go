@@ -387,10 +387,7 @@ func isConnectionError(err error) bool {
 	}
 	// Check for net.Error (timeout, connection refused, etc.)
 	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return false
+	return errors.As(err, &netErr)
 }
 
 func newTuiModel(serverAddr string) tuiModel {
@@ -1709,16 +1706,6 @@ func (m tuiModel) findPrevVisibleJob(currentIdx int) int {
 func (m tuiModel) findFirstVisibleJob() int {
 	for i, job := range m.jobs {
 		if m.isJobVisible(job) {
-			return i
-		}
-	}
-	return -1
-}
-
-// findLastVisibleJob finds the last job index that matches active filters
-func (m tuiModel) findLastVisibleJob() int {
-	for i := len(m.jobs) - 1; i >= 0; i-- {
-		if m.isJobVisible(m.jobs[i]) {
 			return i
 		}
 	}

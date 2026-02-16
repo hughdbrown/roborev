@@ -130,24 +130,12 @@ func withRepoName(name string) func(*storage.ReviewJob) {
 	return func(j *storage.ReviewJob) { j.RepoName = name }
 }
 
-func withFinishedAt(t *time.Time) func(*storage.ReviewJob) {
-	return func(j *storage.ReviewJob) { j.FinishedAt = t }
-}
-
 func withEnqueuedAt(t time.Time) func(*storage.ReviewJob) {
 	return func(j *storage.ReviewJob) { j.EnqueuedAt = t }
 }
 
-func withModel(model string) func(*storage.ReviewJob) {
-	return func(j *storage.ReviewJob) { j.Model = model }
-}
-
 func withError(err string) func(*storage.ReviewJob) {
 	return func(j *storage.ReviewJob) { j.Error = err }
-}
-
-func withVerdict(v string) func(*storage.ReviewJob) {
-	return func(j *storage.ReviewJob) { j.Verdict = &v }
 }
 
 func withReviewType(rt string) func(*storage.ReviewJob) {
@@ -171,16 +159,8 @@ func withReviewOutput(output string) func(*storage.Review) {
 	return func(r *storage.Review) { r.Output = output }
 }
 
-func withReviewAddressed(addressed bool) func(*storage.Review) {
-	return func(r *storage.Review) { r.Addressed = addressed }
-}
-
 func withReviewAgent(agent string) func(*storage.Review) {
 	return func(r *storage.Review) { r.Agent = agent }
-}
-
-func withReviewPrompt(prompt string) func(*storage.Review) {
-	return func(r *storage.Review) { r.Prompt = prompt }
 }
 
 func TestTUIFetchJobsSuccess(t *testing.T) {

@@ -629,7 +629,7 @@ func createMockRefineHandler(state *mockRefineState) http.Handler {
 				review = state.reviews[sha]
 			} else if jobIDStr != "" {
 				var jobID int64
-				fmt.Sscanf(jobIDStr, "%d", &jobID)
+				_, _ = fmt.Sscanf(jobIDStr, "%d", &jobID)
 				// Find review by job ID
 				for _, rev := range state.reviews {
 					if rev.JobID == jobID {
@@ -654,7 +654,7 @@ func createMockRefineHandler(state *mockRefineState) http.Handler {
 		case r.URL.Path == "/api/comments" && r.Method == "GET":
 			jobIDStr := r.URL.Query().Get("job_id")
 			var jobID int64
-			fmt.Sscanf(jobIDStr, "%d", &jobID)
+			_, _ = fmt.Sscanf(jobIDStr, "%d", &jobID)
 			state.mu.Lock()
 			// Copy slice under lock before encoding
 			origResponses := state.responses[jobID]
@@ -1045,7 +1045,7 @@ func TestRefineLoopStaysOnFailedFixChain(t *testing.T) {
 			return "", err
 		}
 		if output != nil {
-			output.Write([]byte(change))
+			_, _ = output.Write([]byte(change))
 		}
 		return change, nil
 	}})
@@ -1412,7 +1412,7 @@ func TestDaemonStopUnreadableFileSkipped(t *testing.T) {
 		t.Fatalf("chmod daemon.json: %v", err)
 	}
 	// Restore permission for cleanup
-	defer os.Chmod(daemonPath, 0644)
+	defer func() { _ = os.Chmod(daemonPath, 0644) }()
 
 	// Probe whether chmod 0000 actually blocks reads on this filesystem
 	// (some filesystems like Windows or certain ACL-based systems may not enforce this)
