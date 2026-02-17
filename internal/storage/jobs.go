@@ -880,9 +880,11 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 	var agenticInt int
 	var jobType sql.NullString
 	var reviewType sql.NullString
+	var outputPrefix sql.NullString
 	err = db.QueryRow(`
 		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.agent, j.model, j.reasoning, j.status, j.enqueued_at,
-		       r.root_path, r.name, c.subject, j.diff_content, j.prompt, COALESCE(j.agentic, 0), j.job_type, j.review_type
+		       r.root_path, r.name, c.subject, j.diff_content, j.prompt, COALESCE(j.agentic, 0), j.job_type, j.review_type,
+		       j.output_prefix
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
 		LEFT JOIN commits c ON c.id = j.commit_id
@@ -890,7 +892,8 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 		ORDER BY j.started_at DESC
 		LIMIT 1
 	`, workerID).Scan(&job.ID, &job.RepoID, &commitID, &job.GitRef, &branch, &job.Agent, &model, &job.Reasoning, &job.Status, &enqueuedAt,
-		&job.RepoPath, &job.RepoName, &commitSubject, &diffContent, &prompt, &agenticInt, &jobType, &reviewType)
+		&job.RepoPath, &job.RepoName, &commitSubject, &diffContent, &prompt, &agenticInt, &jobType, &reviewType,
+		&outputPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -919,6 +922,9 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 	}
 	if reviewType.Valid {
 		job.ReviewType = reviewType.String
+	}
+	if outputPrefix.Valid {
+		job.OutputPrefix = outputPrefix.String
 	}
 	job.EnqueuedAt = parseSQLiteTime(enqueuedAt)
 	job.Status = JobStatusRunning
