@@ -98,6 +98,16 @@ func TestIsValidConsolidatedReview(t *testing.T) {
 			output: "Traceback (most recent call last):\n  File main.py",
 			want:   false,
 		},
+		{
+			name:   "valid_plain_text_no_structure",
+			output: "No remaining issues found. The codebase looks clean.",
+			want:   true,
+		},
+		{
+			name:   "valid_alternative_wording",
+			output: "All findings have been resolved in the current codebase.",
+			want:   true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -497,24 +497,30 @@ func (wp *WorkerPool) markCompactSourceJobs(workerID string, jobID int64) error 
 	log.Printf("[%s] Marking %d source jobs as addressed for compact job %d", workerID, len(metadata.SourceJobIDs), jobID)
 
 	// Mark each source job as addressed
-	successCount := 0
+	var failedIDs []int64
 	for _, srcJobID := range metadata.SourceJobIDs {
 		if err := wp.db.MarkReviewAddressedByJobID(srcJobID, true); err != nil {
 			log.Printf("[%s] Failed to mark job %d as addressed: %v", workerID, srcJobID, err)
-		} else {
-			successCount++
+			failedIDs = append(failedIDs, srcJobID)
 		}
 	}
 
-	// Clean up metadata file after processing (best effort)
+	successCount := len(metadata.SourceJobIDs) - len(failedIDs)
+	if successCount > 0 {
+		log.Printf("[%s] Marked %d/%d source jobs as addressed", workerID, successCount, len(metadata.SourceJobIDs))
+	}
+
+	// Only delete metadata when all source jobs were marked.
+	// On partial failure, keep metadata so a re-run can retry.
+	if len(failedIDs) > 0 {
+		log.Printf("[%s] Keeping compact metadata for job %d (%d jobs failed)", workerID, jobID, len(failedIDs))
+		return nil
+	}
+
 	if err := DeleteCompactMetadata(jobID); err != nil {
 		log.Printf("[%s] Failed to delete compact metadata for job %d: %v", workerID, jobID, err)
 	} else {
 		log.Printf("[%s] Cleaned up compact metadata for job %d", workerID, jobID)
-	}
-
-	if successCount > 0 {
-		log.Printf("[%s] Successfully marked %d/%d source jobs as addressed", workerID, successCount, len(metadata.SourceJobIDs))
 	}
 
 	return nil
