@@ -149,4 +149,28 @@ func TestIsDirtyJob(t *testing.T) {
 	}
 }
 
+func TestIsPromptJob(t *testing.T) {
+	tests := []struct {
+		name string
+		job  ReviewJob
+		want bool
+	}{
+		{name: "task", job: ReviewJob{JobType: JobTypeTask}, want: true},
+		{name: "compact", job: ReviewJob{JobType: JobTypeCompact}, want: true},
+		{name: "review", job: ReviewJob{JobType: JobTypeReview}, want: false},
+		{name: "range", job: ReviewJob{JobType: JobTypeRange}, want: false},
+		{name: "dirty", job: ReviewJob{JobType: JobTypeDirty}, want: false},
+		{name: "empty", job: ReviewJob{JobType: ""}, want: false},
+		{name: "security", job: ReviewJob{JobType: "security"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.job.IsPromptJob(); got != tt.want {
+				t.Errorf("IsPromptJob() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func ptr[T any](v T) *T { return &v }

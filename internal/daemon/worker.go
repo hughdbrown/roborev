@@ -280,11 +280,11 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	wp.registerRunningJob(job.ID, cancel)
 	defer wp.unregisterRunningJob(job.ID)
 
-	// Build the prompt (or use pre-stored prompt for task jobs)
+	// Build the prompt (or use pre-stored prompt for task/compact jobs)
 	var reviewPrompt string
 	var err error
-	if job.Prompt != "" {
-		// Job with custom prompt (task, compact, etc.) - prepend agent-specific preamble if available
+	if job.IsPromptJob() && job.Prompt != "" {
+		// Prompt-native job (task, compact) — prepend agent-specific preamble
 		preamble := prompt.GetSystemPrompt(job.Agent, "run")
 		if preamble != "" {
 			reviewPrompt = preamble + "\n" + job.Prompt

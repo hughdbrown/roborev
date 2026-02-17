@@ -114,6 +114,13 @@ func (j ReviewJob) IsTaskJob() bool {
 	return true
 }
 
+// IsPromptJob returns true if this job type uses a pre-stored prompt
+// (task or compact). These job types have prompts built by the CLI at
+// enqueue time, not constructed by the worker from git data.
+func (j ReviewJob) IsPromptJob() bool {
+	return j.JobType == JobTypeTask || j.JobType == JobTypeCompact
+}
+
 // JobWithReview pairs a job with its review for batch operations
 type JobWithReview struct {
 	Job    ReviewJob `json:"job"`

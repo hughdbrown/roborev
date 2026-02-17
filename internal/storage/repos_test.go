@@ -1038,3 +1038,225 @@ func TestVerdictSuppressionForPromptJobs(t *testing.T) {
 		}
 	})
 }
+
+// TestRetriedReviewJobNotRoutedAsPromptJob verifies that when a review
+// job is retried, the saved prompt from the first run does not cause
+// the job to be misidentified as a prompt-native job (task/compact).
+// This is the storage-level regression test for the IsPromptJob gate.
+func TestRetriedReviewJobNotRoutedAsPromptJob(t *testing.T) {
+	t.Run("review job: saved prompt does not make IsPromptJob true", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		repo := createRepo(t, db, "/tmp/retry-review-test")
+		commit := createCommit(t, db, repo.ID, "retry-sha1")
+
+		// 1. Enqueue a review job (no prompt, JobType=review)
+		job := enqueueJob(t, db, repo.ID, commit.ID, "retry-sha1")
+		if job.JobType != JobTypeReview {
+			t.Fatalf("Expected job_type=%q, got %q", JobTypeReview, job.JobType)
+		}
+
+		// 2. Claim it — prompt should be empty
+		claimed := claimJob(t, db, "worker-1")
+		if claimed.Prompt != "" {
+			t.Fatalf("First claim: expected empty prompt, got %q", claimed.Prompt)
+		}
+		if claimed.IsPromptJob() {
+			t.Fatal("First claim: IsPromptJob() should be false for review job")
+		}
+
+		// 3. Worker saves a built prompt (simulating processJob behavior)
+		builtPrompt := "Review commit retry-sha1:\n\ndiff --git a/file.go..."
+		if err := db.SaveJobPrompt(claimed.ID, builtPrompt); err != nil {
+			t.Fatalf("SaveJobPrompt failed: %v", err)
+		}
+
+		// 4. Retry the job (reset to queued)
+		retried, err := db.RetryJob(claimed.ID, 3)
+		if err != nil {
+			t.Fatalf("RetryJob failed: %v", err)
+		}
+		if !retried {
+			t.Fatal("RetryJob returned false, expected true")
+		}
+
+		// 5. Claim again — prompt is non-empty but IsPromptJob must be false
+		reclaimed := claimJob(t, db, "worker-2")
+		if reclaimed.ID != claimed.ID {
+			t.Fatalf("Expected to reclaim job %d, got %d", claimed.ID, reclaimed.ID)
+		}
+		if reclaimed.Prompt == "" {
+			t.Fatal("Reclaim: expected non-empty prompt (saved from first run)")
+		}
+		if reclaimed.JobType != JobTypeReview {
+			t.Errorf("Reclaim: expected job_type=%q, got %q", JobTypeReview, reclaimed.JobType)
+		}
+		if reclaimed.IsPromptJob() {
+			t.Error("Reclaim: IsPromptJob() must be false for review job, even with saved prompt")
+		}
+	})
+
+	t.Run("task job: IsPromptJob true across retry", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		repo := createRepo(t, db, "/tmp/retry-task-test")
+
+		// 1. Enqueue a task job with a prompt
+		taskPrompt := "Analyze the codebase architecture"
+		job := mustEnqueuePromptJob(t, db, EnqueueOpts{
+			RepoID: repo.ID,
+			Agent:  "test",
+			Prompt: taskPrompt,
+		})
+		if job.JobType != JobTypeTask {
+			t.Fatalf("Expected job_type=%q, got %q", JobTypeTask, job.JobType)
+		}
+
+		// 2. Claim it — prompt and IsPromptJob should both be set
+		claimed := claimJob(t, db, "worker-1")
+		if claimed.Prompt != taskPrompt {
+			t.Errorf("First claim: expected prompt %q, got %q", taskPrompt, claimed.Prompt)
+		}
+		if !claimed.IsPromptJob() {
+			t.Error("First claim: IsPromptJob() should be true for task job")
+		}
+
+		// 3. Retry
+		retried, err := db.RetryJob(claimed.ID, 3)
+		if err != nil {
+			t.Fatalf("RetryJob failed: %v", err)
+		}
+		if !retried {
+			t.Fatal("RetryJob returned false")
+		}
+
+		// 4. Reclaim — still a task job, still has prompt
+		reclaimed := claimJob(t, db, "worker-2")
+		if reclaimed.ID != claimed.ID {
+			t.Fatalf("Expected to reclaim job %d, got %d", claimed.ID, reclaimed.ID)
+		}
+		if !reclaimed.IsPromptJob() {
+			t.Error("Reclaim: IsPromptJob() must be true for task job")
+		}
+		if reclaimed.Prompt != taskPrompt {
+			t.Errorf("Reclaim: expected prompt %q, got %q", taskPrompt, reclaimed.Prompt)
+		}
+	})
+
+	t.Run("compact job: IsPromptJob true across retry", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		repo := createRepo(t, db, "/tmp/retry-compact-test")
+
+		// Enqueue a compact job (explicit JobType)
+		compactPrompt := "Verify these findings are still relevant..."
+		job := mustEnqueuePromptJob(t, db, EnqueueOpts{
+			RepoID:  repo.ID,
+			Agent:   "test",
+			Prompt:  compactPrompt,
+			JobType: JobTypeCompact,
+			Label:   "compact",
+		})
+		if job.JobType != JobTypeCompact {
+			t.Fatalf("Expected job_type=%q, got %q", JobTypeCompact, job.JobType)
+		}
+
+		// Claim, retry, reclaim
+		claimed := claimJob(t, db, "worker-1")
+		if !claimed.IsPromptJob() {
+			t.Error("Compact job: IsPromptJob() should be true")
+		}
+
+		retried, err := db.RetryJob(claimed.ID, 3)
+		if err != nil {
+			t.Fatalf("RetryJob failed: %v", err)
+		}
+		if !retried {
+			t.Fatal("RetryJob returned false")
+		}
+
+		reclaimed := claimJob(t, db, "worker-2")
+		if !reclaimed.IsPromptJob() {
+			t.Error("Reclaim: IsPromptJob() must be true for compact job")
+		}
+		if reclaimed.Prompt != compactPrompt {
+			t.Errorf("Reclaim: expected prompt %q, got %q", compactPrompt, reclaimed.Prompt)
+		}
+	})
+
+	t.Run("dirty job: saved prompt does not make IsPromptJob true", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		repo := createRepo(t, db, "/tmp/retry-dirty-test")
+
+		// Enqueue a dirty job
+		job := mustEnqueuePromptJob(t, db, EnqueueOpts{
+			RepoID:      repo.ID,
+			Agent:       "test",
+			GitRef:      "dirty",
+			DiffContent: "diff --git a/file.go b/file.go\n+new line",
+		})
+		if job.JobType != JobTypeDirty {
+			t.Fatalf("Expected job_type=%q, got %q", JobTypeDirty, job.JobType)
+		}
+
+		// Claim, save prompt, retry, reclaim
+		claimed := claimJob(t, db, "worker-1")
+		if err := db.SaveJobPrompt(claimed.ID, "Review dirty changes..."); err != nil {
+			t.Fatalf("SaveJobPrompt failed: %v", err)
+		}
+
+		retried, err := db.RetryJob(claimed.ID, 3)
+		if err != nil {
+			t.Fatalf("RetryJob failed: %v", err)
+		}
+		if !retried {
+			t.Fatal("RetryJob returned false")
+		}
+
+		reclaimed := claimJob(t, db, "worker-2")
+		if reclaimed.IsPromptJob() {
+			t.Error("Dirty job: IsPromptJob() must be false even with saved prompt")
+		}
+	})
+
+	t.Run("range job: saved prompt does not make IsPromptJob true", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		repo := createRepo(t, db, "/tmp/retry-range-test")
+
+		// Enqueue a range job
+		job := mustEnqueuePromptJob(t, db, EnqueueOpts{
+			RepoID: repo.ID,
+			Agent:  "test",
+			GitRef: "abc123..def456",
+		})
+		if job.JobType != JobTypeRange {
+			t.Fatalf("Expected job_type=%q, got %q", JobTypeRange, job.JobType)
+		}
+
+		// Claim, save prompt, retry, reclaim
+		claimed := claimJob(t, db, "worker-1")
+		if err := db.SaveJobPrompt(claimed.ID, "Review range abc123..def456..."); err != nil {
+			t.Fatalf("SaveJobPrompt failed: %v", err)
+		}
+
+		retried, err := db.RetryJob(claimed.ID, 3)
+		if err != nil {
+			t.Fatalf("RetryJob failed: %v", err)
+		}
+		if !retried {
+			t.Fatal("RetryJob returned false")
+		}
+
+		reclaimed := claimJob(t, db, "worker-2")
+		if reclaimed.IsPromptJob() {
+			t.Error("Range job: IsPromptJob() must be false even with saved prompt")
+		}
+	})
+}
