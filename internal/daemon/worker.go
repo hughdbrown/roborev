@@ -393,19 +393,22 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	// jobs as addressed. CompleteJob no-ops when status != running.
 	if job.JobType == "compact" {
 		j, err := wp.db.GetJobByID(job.ID)
-		if err != nil || j.Status != storage.JobStatusDone {
-			if err != nil {
-				log.Printf("[%s] Compact job %d: failed to verify status: %v", workerID, job.ID, err)
-			} else {
-				log.Printf("[%s] Compact job %d not completed (status=%s), skipping source marking", workerID, job.ID, j.Status)
-			}
+		if err != nil {
+			// Transient read error — skip source marking but don't
+			// suppress the completion broadcast below.
+			log.Printf("[%s] Compact job %d: failed to verify status: %v", workerID, job.ID, err)
+		} else if j.Status != storage.JobStatusDone {
+			// Job was canceled between agent finish and CompleteJob.
+			// No review was stored, so skip broadcast too.
+			log.Printf("[%s] Compact job %d not completed (status=%s), skipping source marking", workerID, job.ID, j.Status)
 			return
-		}
-		persistedOutput := job.OutputPrefix + output
-		if !IsValidCompactOutput(persistedOutput) {
-			log.Printf("[%s] Compact job %d produced invalid output, not marking source jobs", workerID, job.ID)
-		} else if err := wp.markCompactSourceJobs(workerID, job.ID); err != nil {
-			log.Printf("[%s] Warning: failed to mark compact source jobs for job %d: %v", workerID, job.ID, err)
+		} else {
+			persistedOutput := job.OutputPrefix + output
+			if !IsValidCompactOutput(persistedOutput) {
+				log.Printf("[%s] Compact job %d produced invalid output, not marking source jobs", workerID, job.ID)
+			} else if err := wp.markCompactSourceJobs(workerID, job.ID); err != nil {
+				log.Printf("[%s] Warning: failed to mark compact source jobs for job %d: %v", workerID, job.ID, err)
+			}
 		}
 	}
 

@@ -117,43 +117,31 @@ type jobReview struct {
 	review *storage.Review
 }
 
-// fetchJobReviews fetches job and review data for all job IDs in a single batch request.
+// maxBatchFetch matches the server-side maxBatchSize for /api/jobs/batch.
+const maxBatchFetch = 100
+
+// fetchJobReviews fetches job and review data for all job IDs, chunking
+// into batches of maxBatchFetch to respect the server-side limit.
 // Returns successfully fetched entries and list of IDs that were processed.
 func fetchJobReviews(ctx context.Context, jobIDs []int64, quiet bool, cmd *cobra.Command) ([]jobReview, []int64, error) {
 	if !quiet {
 		cmd.Printf("  Fetching %d job(s)... ", len(jobIDs))
 	}
 
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"job_ids": jobIDs,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal batch request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", serverAddr+"/api/jobs/batch", bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, nil, fmt.Errorf("create batch request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("batch fetch: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("batch fetch failed (%d): %s", resp.StatusCode, body)
-	}
-
-	var batchResp struct {
-		Results map[int64]storage.JobWithReview `json:"results"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
-		return nil, nil, fmt.Errorf("decode batch response: %w", err)
+	// Fetch in chunks to stay within server batch limit
+	allResults := make(map[int64]storage.JobWithReview)
+	for i := 0; i < len(jobIDs); i += maxBatchFetch {
+		end := i + maxBatchFetch
+		if end > len(jobIDs) {
+			end = len(jobIDs)
+		}
+		results, err := fetchJobBatch(ctx, jobIDs[i:end])
+		if err != nil {
+			return nil, nil, err
+		}
+		for k, v := range results {
+			allResults[k] = v
+		}
 	}
 
 	var jobReviews []jobReview
@@ -161,7 +149,7 @@ func fetchJobReviews(ctx context.Context, jobIDs []int64, quiet bool, cmd *cobra
 
 	// Iterate in the original order to maintain deterministic output
 	for _, jobID := range jobIDs {
-		entry, ok := batchResp.Results[jobID]
+		entry, ok := allResults[jobID]
 		if !ok || entry.Review == nil {
 			if !quiet {
 				cmd.Printf("\n  Skipping job %d (no review found)", jobID)
@@ -186,6 +174,42 @@ func fetchJobReviews(ctx context.Context, jobIDs []int64, quiet bool, cmd *cobra
 	}
 
 	return jobReviews, successfulJobIDs, nil
+}
+
+// fetchJobBatch fetches a single batch of job reviews from the daemon.
+func fetchJobBatch(ctx context.Context, ids []int64) (map[int64]storage.JobWithReview, error) {
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"job_ids": ids,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal batch request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", serverAddr+"/api/jobs/batch", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create batch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("batch fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("batch fetch failed (%d): %s", resp.StatusCode, body)
+	}
+
+	var batchResp struct {
+		Results map[int64]storage.JobWithReview `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		return nil, fmt.Errorf("decode batch response: %w", err)
+	}
+	return batchResp.Results, nil
 }
 
 // enqueueConsolidation creates and enqueues a consolidation job.
