@@ -403,8 +403,10 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 			log.Printf("[%s] Compact job %d not completed (status=%s), skipping source marking", workerID, job.ID, j.Status)
 			return
 		} else {
-			persistedOutput := job.OutputPrefix + output
-			if !IsValidCompactOutput(persistedOutput) {
+			// Validate the raw agent output (not the prefixed form)
+			// to catch empty/error responses that would be masked
+			// by the always-present output prefix.
+			if !IsValidCompactOutput(output) {
 				log.Printf("[%s] Compact job %d produced invalid output, not marking source jobs", workerID, job.ID)
 			} else if err := wp.markCompactSourceJobs(workerID, job.ID); err != nil {
 				log.Printf("[%s] Warning: failed to mark compact source jobs for job %d: %v", workerID, job.ID, err)
