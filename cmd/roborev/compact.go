@@ -262,7 +262,7 @@ func enqueueConsolidation(ctx context.Context, cmd *cobra.Command, repoRoot stri
 	return job.ID, nil
 }
 
-// waitForConsolidation waits for a consolidation job to complete and validates output.
+// waitForConsolidation waits for a consolidation job to complete.
 func waitForConsolidation(ctx context.Context, cmd *cobra.Command, jobID int64, opts compactOptions) error {
 	timeout := opts.timeout
 	if timeout <= 0 {
