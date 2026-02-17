@@ -18,7 +18,14 @@ services).
 The TUI talks to the daemon over loopback HTTP. Do not flag thundering-herd or
 rate-limiting concerns for local loopback requests unless the number of concurrent
 requests scales with untrusted input or external data. A bounded number of requests
-proportional to the user's tracked repos is acceptable.
+proportional to the user's tracked repos is acceptable. The daemon API is bound to
+127.0.0.1 and only serves the local CLI/TUI. Do not flag:
+- Missing authentication/authorization on daemon endpoints — the only client is the
+  user's own tooling on the same machine, and OS-level access control is sufficient
+- "DoS" via unbounded request bodies — the only sender is the local CLI, which
+  constructs bounded requests from the user's own data (job IDs, repo paths, etc.)
+- "Data exposure" from endpoints returning job/review content — this is the user's
+  own review data on their own machine, accessible only over loopback
 
 Git hooks (pre-commit, commit-msg, post-checkout, etc.) are the user's own scripts
 running on their own machine. Hook stderr forwarded to agents or printed to the

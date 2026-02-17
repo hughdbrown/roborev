@@ -284,11 +284,13 @@ func runCompact(cmd *cobra.Command, opts compactOptions) error {
 		branchFilter = git.GetCurrentBranch(repoRoot)
 	}
 
-	// Query and limit jobs
-	jobs, err := queryUnaddressedJobs(repoRoot, branchFilter)
+	// Query and limit jobs, excluding non-review types (compact, task)
+	// to prevent recursive self-compaction loops
+	allJobs, err := queryUnaddressedJobs(repoRoot, branchFilter)
 	if err != nil {
 		return err
 	}
+	jobs := filterReviewJobs(allJobs)
 
 	if len(jobs) == 0 {
 		if !opts.quiet {
@@ -525,6 +527,21 @@ func enqueueCompactJob(repoRoot, prompt, outputPrefix, label, branch string, opt
 // isValidConsolidatedReview delegates to the shared daemon package
 // so CLI --wait and daemon background mode use the same validation.
 var isValidConsolidatedReview = daemon.IsValidCompactOutput
+
+// filterReviewJobs excludes non-review job types (compact, task) from
+// the source list to prevent recursive self-compaction loops.
+func filterReviewJobs(jobs []storage.ReviewJob) []storage.ReviewJob {
+	filtered := make([]storage.ReviewJob, 0, len(jobs))
+	for _, j := range jobs {
+		switch j.JobType {
+		case "compact", "task":
+			continue
+		default:
+			filtered = append(filtered, j)
+		}
+	}
+	return filtered
+}
 
 // extractJobIDs extracts job IDs from jobReview slice
 func extractJobIDs(reviews []jobReview) []int64 {
