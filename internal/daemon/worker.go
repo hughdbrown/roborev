@@ -388,9 +388,11 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 
 	log.Printf("[%s] Completed job %d", workerID, job.ID)
 
-	// For compact jobs, validate output then mark source jobs as addressed
+	// For compact jobs, validate persisted output (prefix + agent text)
+	// before marking source jobs as addressed
 	if job.JobType == "compact" {
-		if !IsValidCompactOutput(output) {
+		persistedOutput := job.OutputPrefix + output
+		if !IsValidCompactOutput(persistedOutput) {
 			log.Printf("[%s] Compact job %d produced invalid output, not marking source jobs", workerID, job.ID)
 		} else if err := wp.markCompactSourceJobs(workerID, job.ID); err != nil {
 			log.Printf("[%s] Warning: failed to mark compact source jobs for job %d: %v", workerID, job.ID, err)
