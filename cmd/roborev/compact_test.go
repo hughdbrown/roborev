@@ -305,7 +305,7 @@ func TestBuildCompactPrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildCompactPrompt(tt.jobReviews, tt.branch)
+			got := buildCompactPrompt(tt.jobReviews, tt.branch, "")
 
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {

@@ -216,7 +216,7 @@ func fetchJobBatch(ctx context.Context, ids []int64) (map[int64]storage.JobWithR
 // Returns the job ID for tracking.
 func enqueueConsolidation(ctx context.Context, cmd *cobra.Command, repoRoot string, jobReviews []jobReview, branchFilter string, opts compactOptions) (int64, error) {
 	// Build verification prompt
-	prompt := buildCompactPrompt(jobReviews, branchFilter)
+	prompt := buildCompactPrompt(jobReviews, branchFilter, repoRoot)
 
 	// Resolve agent/model/reasoning using "fix" workflow so compact
 	// uses the same config as `roborev fix`.  Pass the resolved values
@@ -445,11 +445,19 @@ func runCompact(cmd *cobra.Command, opts compactOptions) error {
 	return nil
 }
 
-func buildCompactPrompt(jobReviews []jobReview, branch string) string {
+func buildCompactPrompt(jobReviews []jobReview, branch, repoRoot string) string {
 	var sb strings.Builder
 
 	sb.WriteString("# Verification and Consolidation Request\n\n")
 	sb.WriteString("You are a code reviewer tasked with verifying and consolidating previous review findings.\n\n")
+
+	// Include project review guidelines so the compact agent
+	// respects the same rules as regular reviews.
+	if repoCfg, err := config.LoadRepoConfig(repoRoot); err == nil && repoCfg != nil && repoCfg.ReviewGuidelines != "" {
+		sb.WriteString("## Project Guidelines\n\n")
+		sb.WriteString(strings.TrimSpace(repoCfg.ReviewGuidelines))
+		sb.WriteString("\n\n")
+	}
 
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("1. **Verify each finding against the current codebase:**\n")
