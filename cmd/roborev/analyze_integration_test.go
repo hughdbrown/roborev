@@ -16,6 +16,13 @@ import (
 	"github.com/roborev-dev/roborev/internal/storage"
 )
 
+type jobResponse struct {
+	status   string
+	review   string
+	errMsg   string
+	notFound bool
+}
+
 func TestWaitForAnalysisJob(t *testing.T) {
 	tests := []struct {
 		name       string

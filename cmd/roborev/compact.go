@@ -284,12 +284,12 @@ func runCompact(cmd *cobra.Command, opts compactOptions) error {
 	}
 
 	// Query and limit jobs
-	jobIDs, err := queryUnaddressedJobs(repoRoot, branchFilter)
+	jobs, err := queryUnaddressedJobs(repoRoot, branchFilter)
 	if err != nil {
 		return err
 	}
 
-	if len(jobIDs) == 0 {
+	if len(jobs) == 0 {
 		if !opts.quiet {
 			cmd.Println("No unaddressed jobs found.")
 		}
@@ -297,23 +297,29 @@ func runCompact(cmd *cobra.Command, opts compactOptions) error {
 	}
 
 	// Apply limit
-	if opts.limit > 0 && len(jobIDs) > opts.limit {
+	if opts.limit > 0 && len(jobs) > opts.limit {
 		if !opts.quiet {
 			cmd.Printf("Found %d unaddressed jobs, limiting to %d (use --limit to adjust)\n\n",
-				len(jobIDs), opts.limit)
+				len(jobs), opts.limit)
 		}
-		jobIDs = jobIDs[:opts.limit]
+		jobs = jobs[:opts.limit]
 	} else if !opts.quiet {
 		branchMsg := ""
 		if branchFilter != "" {
 			branchMsg = fmt.Sprintf(" on branch %s", branchFilter)
 		}
-		cmd.Printf("Found %d unaddressed job(s)%s: %v\n\n", len(jobIDs), branchMsg, jobIDs)
+		cmd.Printf("Found %d unaddressed job(s)%s\n\n", len(jobs), branchMsg)
 	}
 
 	// Warn about very large limits
 	if opts.limit > 50 && !opts.quiet {
 		cmd.Printf("Warning: --limit=%d may create a very large prompt\n\n", opts.limit)
+	}
+
+	// Extract job IDs
+	jobIDs := make([]int64, len(jobs))
+	for i, j := range jobs {
+		jobIDs[i] = j.ID
 	}
 
 	// Dry-run early exit
