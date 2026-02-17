@@ -1330,3 +1330,86 @@ func TestTUIPendingAddressedClearedOnCurrentError(t *testing.T) {
 		t.Error("Error should be set on current error")
 	}
 }
+
+func TestTUIHideAddressedStatsNotDoubleCounted(t *testing.T) {
+	// Regression test: when hideAddressed is active, marking a job
+	// as addressed then receiving a refresh should not double-count
+	// the delta (which made Unaddressed go negative).
+	m := newTuiModel("http://localhost")
+	m.hideAddressed = true
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withAddressed(boolPtr(false))),
+	}
+	m.jobStats = storage.JobStats{Done: 10, Addressed: 5, Unaddressed: 5}
+
+	// User marks job 1 as addressed
+	m.pendingAddressed[1] = pendingState{newState: true, seq: 1}
+	m.applyStatsDelta(true) // optimistic: Addressed=6, Unaddressed=4
+
+	if m.jobStats.Addressed != 6 || m.jobStats.Unaddressed != 4 {
+		t.Fatalf("After optimistic delta: Addressed=%d Unaddressed=%d, want 6/4",
+			m.jobStats.Addressed, m.jobStats.Unaddressed)
+	}
+
+	// Server refresh arrives. Server stats already include the change.
+	// Job 1 is absent from response because hideAddressed filters it out.
+	jobsMsg := tuiJobsMsg{
+		jobs:  []storage.ReviewJob{}, // job 1 filtered out
+		stats: storage.JobStats{Done: 10, Addressed: 6, Unaddressed: 4},
+	}
+
+	m2, _ := updateModel(t, m, jobsMsg)
+
+	// Pending should be cleared (absence = confirmation when hiding addressed)
+	if _, ok := m2.pendingAddressed[1]; ok {
+		t.Error("pendingAddressed should be cleared when job absent and hideAddressed active")
+	}
+
+	// Stats should match server exactly, not double-count
+	if m2.jobStats.Addressed != 6 {
+		t.Errorf("Addressed = %d, want 6", m2.jobStats.Addressed)
+	}
+	if m2.jobStats.Unaddressed != 4 {
+		t.Errorf("Unaddressed = %d, want 4", m2.jobStats.Unaddressed)
+	}
+}
+
+func TestTUIHideAddressedPendingNotClearedWhenServerLags(t *testing.T) {
+	// When hideAddressed is active but the server hasn't absorbed the
+	// change yet (job still appears as unaddressed), the pending entry
+	// must NOT be cleared.
+	m := newTuiModel("http://localhost")
+	m.hideAddressed = true
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withAddressed(boolPtr(false))),
+	}
+	m.jobStats = storage.JobStats{Done: 10, Addressed: 5, Unaddressed: 5}
+
+	// User marks job 1 as addressed
+	m.pendingAddressed[1] = pendingState{newState: true, seq: 1}
+	m.applyStatsDelta(true)
+
+	// Stale server refresh: job 1 still in response as unaddressed
+	// (API call hasn't been processed yet)
+	staleMsg := tuiJobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(1, withAddressed(boolPtr(false))),
+		},
+		stats: storage.JobStats{Done: 10, Addressed: 5, Unaddressed: 5},
+	}
+
+	m2, _ := updateModel(t, m, staleMsg)
+
+	// Pending should NOT be cleared (server still shows unaddressed)
+	if _, ok := m2.pendingAddressed[1]; !ok {
+		t.Error("pendingAddressed should NOT be cleared when job still in response as unaddressed")
+	}
+
+	// Delta should be reapplied on top of stale server stats
+	if m2.jobStats.Addressed != 6 {
+		t.Errorf("Addressed = %d, want 6 (stale stats + delta)", m2.jobStats.Addressed)
+	}
+	if m2.jobStats.Unaddressed != 4 {
+		t.Errorf("Unaddressed = %d, want 4 (stale stats + delta)", m2.jobStats.Unaddressed)
+	}
+}
