@@ -292,6 +292,62 @@ func TestGetJobsWithReviewsByIDs(t *testing.T) {
 	})
 }
 
+func TestGetJobsWithReviewsByIDsPopulatesVerdict(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo := createRepo(t, db, "/tmp/verdict-batch-test")
+
+	// Create a job with a PASS verdict
+	passJob := createCompletedJob(t, db, repo.ID, "pass111", "No issues found.\n\n## Verdict: PASS")
+
+	// Create a job with a FAIL verdict
+	failJob := createCompletedJob(t, db, repo.ID, "fail222", "- High — Critical bug found")
+
+	results, err := db.GetJobsWithReviewsByIDs([]int64{passJob.ID, failJob.ID})
+	if err != nil {
+		t.Fatalf("GetJobsWithReviewsByIDs failed: %v", err)
+	}
+
+	// Check PASS verdict
+	passResult, ok := results[passJob.ID]
+	if !ok {
+		t.Fatalf("Expected result for pass job ID %d", passJob.ID)
+	}
+	if passResult.Job.Verdict == nil {
+		t.Fatal("Expected Verdict to be populated for pass job")
+	}
+	if *passResult.Job.Verdict != "P" {
+		t.Errorf("Expected verdict P, got %q", *passResult.Job.Verdict)
+	}
+
+	// Check FAIL verdict
+	failResult, ok := results[failJob.ID]
+	if !ok {
+		t.Fatalf("Expected result for fail job ID %d", failJob.ID)
+	}
+	if failResult.Job.Verdict == nil {
+		t.Fatal("Expected Verdict to be populated for fail job")
+	}
+	if *failResult.Job.Verdict != "F" {
+		t.Errorf("Expected verdict F, got %q", *failResult.Job.Verdict)
+	}
+
+	// Also verify VerdictBool on the review
+	if passResult.Review == nil {
+		t.Fatal("Expected review for pass job")
+	}
+	if passResult.Review.VerdictBool == nil || *passResult.Review.VerdictBool != 1 {
+		t.Errorf("Expected VerdictBool=1 for pass job, got %v", passResult.Review.VerdictBool)
+	}
+	if failResult.Review == nil {
+		t.Fatal("Expected review for fail job")
+	}
+	if failResult.Review.VerdictBool == nil || *failResult.Review.VerdictBool != 0 {
+		t.Errorf("Expected VerdictBool=0 for fail job, got %v", failResult.Review.VerdictBool)
+	}
+}
+
 // createCompletedJob helper creates a job, claims it, and completes it.
 func createCompletedJob(t *testing.T, db *DB, repoID int64, gitRef, output string) *ReviewJob {
 	t.Helper()
