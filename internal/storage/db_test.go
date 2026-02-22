@@ -1534,6 +1534,65 @@ func TestMigrationAddsVerdictBoolColumn(t *testing.T) {
 	}
 }
 
+func TestCompleteJobPopulatesVerdictBool(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo := createRepo(t, db, "/tmp/verdict-test")
+	commit := createCommit(t, db, repo.ID, "verdict123")
+
+	t.Run("pass review stores verdict_bool=1", func(t *testing.T) {
+		job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "verdict123", Agent: "codex"})
+		if err != nil {
+			t.Fatalf("EnqueueJob: %v", err)
+		}
+		claimed := claimJob(t, db, "w1")
+		if claimed == nil {
+			t.Fatal("no job to claim")
+		}
+
+		err = db.CompleteJob(job.ID, "codex", "prompt", "No issues found.")
+		if err != nil {
+			t.Fatalf("CompleteJob: %v", err)
+		}
+
+		var verdictBool sql.NullInt64
+		err = db.QueryRow(`SELECT verdict_bool FROM reviews WHERE job_id = ?`, job.ID).Scan(&verdictBool)
+		if err != nil {
+			t.Fatalf("query verdict_bool: %v", err)
+		}
+		if !verdictBool.Valid || verdictBool.Int64 != 1 {
+			t.Errorf("expected verdict_bool=1 (pass), got %v", verdictBool)
+		}
+	})
+
+	t.Run("fail review stores verdict_bool=0", func(t *testing.T) {
+		commit2 := createCommit(t, db, repo.ID, "verdict456")
+		job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit2.ID, GitRef: "verdict456", Agent: "codex"})
+		if err != nil {
+			t.Fatalf("EnqueueJob: %v", err)
+		}
+		claimed := claimJob(t, db, "w2")
+		if claimed == nil {
+			t.Fatal("no job to claim")
+		}
+
+		err = db.CompleteJob(job.ID, "codex", "prompt", "- High — SQL injection in login handler")
+		if err != nil {
+			t.Fatalf("CompleteJob: %v", err)
+		}
+
+		var verdictBool sql.NullInt64
+		err = db.QueryRow(`SELECT verdict_bool FROM reviews WHERE job_id = ?`, job.ID).Scan(&verdictBool)
+		if err != nil {
+			t.Fatalf("query verdict_bool: %v", err)
+		}
+		if !verdictBool.Valid || verdictBool.Int64 != 0 {
+			t.Errorf("expected verdict_bool=0 (fail), got %v", verdictBool)
+		}
+	})
+}
+
 func TestMigrationQuotedTableWithOrphanedFK(t *testing.T) {
 	// Regression test: after a prior migration rebuilds review_jobs via
 	// ALTER TABLE ... RENAME, SQLite stores the table name quoted as
