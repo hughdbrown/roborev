@@ -19,6 +19,18 @@ func verdictToBool(verdict string) int {
 	return 0
 }
 
+// verdictFromBoolOrParse returns the verdict string from a stored verdict_bool
+// value. If the value is NULL (legacy row), falls back to ParseVerdict(output).
+func verdictFromBoolOrParse(vb sql.NullInt64, output string) string {
+	if vb.Valid {
+		if vb.Int64 == 1 {
+			return "P"
+		}
+		return "F"
+	}
+	return ParseVerdict(output)
+}
+
 // ParseVerdict extracts P (pass) or F (fail) from review output.
 // Returns "P" only if a clear pass indicator appears at the start of a line.
 // Rejects lines containing caveats like "but", "however", "except".

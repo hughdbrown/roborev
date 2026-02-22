@@ -322,6 +322,99 @@ func createCompletedJob(t *testing.T, db *DB, repoID int64, gitRef, output strin
 	return updatedJob
 }
 
+func TestGetReviewByJobIDUsesStoredVerdict(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo := createRepo(t, db, "/tmp/verdict-read-test")
+	commit := createCommit(t, db, repo.ID, "vread123")
+
+	t.Run("new review uses stored verdict_bool", func(t *testing.T) {
+		job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "vread123", Agent: "codex"})
+		if err != nil {
+			t.Fatalf("EnqueueJob: %v", err)
+		}
+		claimJob(t, db, "w1")
+
+		if err := db.CompleteJob(job.ID, "codex", "prompt", "No issues found."); err != nil {
+			t.Fatalf("CompleteJob: %v", err)
+		}
+
+		review, err := db.GetReviewByJobID(job.ID)
+		if err != nil {
+			t.Fatalf("GetReviewByJobID: %v", err)
+		}
+		if review.VerdictBool == nil {
+			t.Fatal("VerdictBool should be set for new reviews")
+		}
+		if *review.VerdictBool != 1 {
+			t.Errorf("expected VerdictBool=1 (pass), got %d", *review.VerdictBool)
+		}
+		if review.Job == nil || review.Job.Verdict == nil || *review.Job.Verdict != "P" {
+			t.Errorf("expected job verdict P, got %v", review.Job.Verdict)
+		}
+	})
+
+	t.Run("legacy review with NULL verdict_bool falls back to ParseVerdict", func(t *testing.T) {
+		commit2 := createCommit(t, db, repo.ID, "vread456")
+		job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit2.ID, GitRef: "vread456", Agent: "codex"})
+		if err != nil {
+			t.Fatalf("EnqueueJob: %v", err)
+		}
+		claimJob(t, db, "w2")
+
+		if err := db.CompleteJob(job.ID, "codex", "prompt", "No issues found."); err != nil {
+			t.Fatalf("CompleteJob: %v", err)
+		}
+
+		// Simulate legacy row by setting verdict_bool to NULL
+		if _, err := db.Exec(`UPDATE reviews SET verdict_bool = NULL WHERE job_id = ?`, job.ID); err != nil {
+			t.Fatalf("nullify verdict_bool: %v", err)
+		}
+
+		review, err := db.GetReviewByJobID(job.ID)
+		if err != nil {
+			t.Fatalf("GetReviewByJobID: %v", err)
+		}
+		if review.VerdictBool != nil {
+			t.Errorf("expected VerdictBool=nil for legacy row, got %d", *review.VerdictBool)
+		}
+		// Should still get correct verdict via ParseVerdict fallback
+		if review.Job == nil || review.Job.Verdict == nil || *review.Job.Verdict != "P" {
+			t.Errorf("expected fallback verdict P, got %v", review.Job.Verdict)
+		}
+	})
+}
+
+func TestGetReviewByCommitSHAUsesStoredVerdict(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo := createRepo(t, db, "/tmp/verdict-sha-test")
+	commit := createCommit(t, db, repo.ID, "shav123")
+
+	job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "shav123", Agent: "codex"})
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimJob(t, db, "w1")
+
+	if err := db.CompleteJob(job.ID, "codex", "prompt", "- High — Bug found"); err != nil {
+		t.Fatalf("CompleteJob: %v", err)
+	}
+
+	review, err := db.GetReviewByCommitSHA("shav123")
+	if err != nil {
+		t.Fatalf("GetReviewByCommitSHA: %v", err)
+	}
+	if review.VerdictBool == nil || *review.VerdictBool != 0 {
+		t.Errorf("expected VerdictBool=0 (fail), got %v", review.VerdictBool)
+	}
+	if review.Job == nil || review.Job.Verdict == nil || *review.Job.Verdict != "F" {
+		t.Errorf("expected verdict F, got %v", review.Job.Verdict)
+	}
+}
+
 // verifyComment helper checks if a comment matches expected values.
 func verifyComment(t *testing.T, actual Response, expectedUser, expectedMsg string) {
 	t.Helper()
