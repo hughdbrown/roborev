@@ -337,14 +337,18 @@ func TestGetJobsWithReviewsByIDsPopulatesVerdict(t *testing.T) {
 	if passResult.Review == nil {
 		t.Fatal("Expected review for pass job")
 	}
-	if passResult.Review.VerdictBool == nil || *passResult.Review.VerdictBool != 1 {
-		t.Errorf("Expected VerdictBool=1 for pass job, got %v", passResult.Review.VerdictBool)
+	if passResult.Review.VerdictBool == nil {
+		t.Error("Expected VerdictBool for pass job, got nil")
+	} else if *passResult.Review.VerdictBool != 1 {
+		t.Errorf("Expected VerdictBool=1 for pass job, got %d", *passResult.Review.VerdictBool)
 	}
 	if failResult.Review == nil {
 		t.Fatal("Expected review for fail job")
 	}
-	if failResult.Review.VerdictBool == nil || *failResult.Review.VerdictBool != 0 {
-		t.Errorf("Expected VerdictBool=0 for fail job, got %v", failResult.Review.VerdictBool)
+	if failResult.Review.VerdictBool == nil {
+		t.Error("Expected VerdictBool for fail job, got nil")
+	} else if *failResult.Review.VerdictBool != 0 {
+		t.Errorf("Expected VerdictBool=0 for fail job, got %d", *failResult.Review.VerdictBool)
 	}
 }
 
