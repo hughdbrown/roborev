@@ -290,3 +290,52 @@ func TestActivityLog_RuntimeRotation(t *testing.T) {
 		)
 	}
 }
+
+func TestActivityLog_RotationRecovery(t *testing.T) {
+	// Exercises maybeRotate's happy path: trigger rotation via
+	// writeCount + oversized file, then verify the log continues
+	// working after truncate-reopen. The O_TRUNC-failure fallback
+	// branch (line 178 of activitylog.go) is not testable without
+	// injecting a mock opener, because on Unix O_TRUNC on an
+	// existing writable file always succeeds.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.log")
+
+	al, err := NewActivityLog(path)
+	if err != nil {
+		t.Fatalf("NewActivityLog: %v", err)
+	}
+	defer al.Close()
+
+	// Write just under the rotation threshold, then force a rotation
+	// by manipulating writeCount and file size.
+	al.mu.Lock()
+	al.writeCount = rotateCheckInterval - 1
+	al.mu.Unlock()
+
+	// Write a large entry to exceed maxActivityLogSize. Use a payload
+	// bigger than the cap so stat triggers rotation on next check.
+	bigMsg := string(make([]byte, maxActivityLogSize+1024))
+	al.Log("test", "test", bigMsg, nil)
+
+	// After rotation, writing should still work (file was reopened)
+	al.Log("post-rotate", "test", "still logging", nil)
+
+	entries := al.RecentN(1)
+	if len(entries) == 0 {
+		t.Fatal("expected entries after rotation")
+	}
+	if entries[0].Event != "post-rotate" {
+		t.Errorf("got event %q, want %q", entries[0].Event, "post-rotate")
+	}
+
+	// Verify the file exists and has content
+	al.Close()
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("log file should exist after rotation: %v", statErr)
+	}
+	if info.Size() == 0 {
+		t.Error("log file should have content after post-rotate write")
+	}
+}

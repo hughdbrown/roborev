@@ -632,14 +632,30 @@ func cloneRemoteMatches(path, ghRepo string) (bool, error) {
 		"git", "-C", path,
 		"config", "--local", "--get", "remote.origin.url",
 	)
-	if err := cfgCmd.Run(); err != nil {
-		// Exit 1 = key missing; exit 128 = not a git repo.
-		// Both mean no local origin configured.
+	cfgCmd.Env = append(os.Environ(), "LC_ALL=C")
+	cfgOut, err := cfgCmd.CombinedOutput()
+	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			code := exitErr.ExitCode()
-			if code == 1 || code == 128 {
+			// Exit 1 = key not found in config.
+			if code == 1 {
 				return false, nil
+			}
+			// Exit 128 = fatal git error. Suppress only when the
+			// repo itself is absent/broken, not on operational
+			// failures like corrupted or unreadable config.
+			if code == 128 {
+				msg := strings.ToLower(string(cfgOut))
+				notRepo := strings.Contains(
+					msg, "git repository",
+				)
+				configMissing := strings.Contains(
+					msg, ".git/config",
+				) && strings.Contains(msg, "no such file")
+				if notRepo || configMissing {
+					return false, nil
+				}
 			}
 		}
 		return false, fmt.Errorf(

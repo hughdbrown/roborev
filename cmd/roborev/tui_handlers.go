@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode"
@@ -20,8 +21,8 @@ func (m tuiModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCommentKey(msg)
 	case tuiViewFilter:
 		return m.handleFilterKey(msg)
-	case tuiViewTail:
-		return m.handleTailKey(msg)
+	case tuiViewLog:
+		return m.handleLogKey(msg)
 	case tuiViewFixPrompt:
 		return m.handleFixPromptKey(msg)
 	case tuiViewTasks:
@@ -256,76 +257,73 @@ func (m *tuiModel) fetchUnloadedBranches() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// handleTailKey handles key input in the tail view.
-func (m tuiModel) handleTailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handleLogKey handles key input in the log view.
+func (m tuiModel) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc", "q":
-		m.currentView = m.tailFromView
-		m.tailStreaming = false
+		m.currentView = m.logFromView
+		m.logStreaming = false
 		return m, nil
 	case "x":
-		if m.tailJobID > 0 && m.tailStreaming {
-			for i := range m.jobs {
-				if m.jobs[i].ID == m.tailJobID {
-					job := &m.jobs[i]
-					if job.Status == storage.JobStatusRunning {
-						oldStatus := job.Status
-						oldFinishedAt := job.FinishedAt
-						job.Status = storage.JobStatusCanceled
-						now := time.Now()
-						job.FinishedAt = &now
-						m.tailStreaming = false
-						return m, m.cancelJob(job.ID, oldStatus, oldFinishedAt)
-					}
-					break
-				}
+		if m.logJobID > 0 && m.logStreaming {
+			if job := m.logViewLookupJob(); job != nil &&
+				job.Status == storage.JobStatusRunning {
+				oldStatus := job.Status
+				oldFinishedAt := job.FinishedAt
+				job.Status = storage.JobStatusCanceled
+				now := time.Now()
+				job.FinishedAt = &now
+				m.logStreaming = false
+				return m, m.cancelJob(
+					job.ID, oldStatus, oldFinishedAt,
+				)
 			}
 		}
 		return m, nil
 	case "up", "k":
-		m.tailFollow = false
-		if m.tailScroll > 0 {
-			m.tailScroll--
+		m.logFollow = false
+		if m.logScroll > 0 {
+			m.logScroll--
 		}
 		return m, nil
 	case "down", "j":
-		m.tailScroll++
+		m.logScroll++
 		return m, nil
 	case "pgup":
-		m.tailFollow = false
-		visibleLines := max(m.height-4, 1)
-		m.tailScroll -= visibleLines
-		if m.tailScroll < 0 {
-			m.tailScroll = 0
+		m.logFollow = false
+		m.logScroll -= m.logVisibleLines()
+		if m.logScroll < 0 {
+			m.logScroll = 0
 		}
 		return m, tea.ClearScreen
 	case "pgdown":
-		visibleLines := max(m.height-4, 1)
-		m.tailScroll += visibleLines
+		m.logScroll += m.logVisibleLines()
 		return m, tea.ClearScreen
 	case "home":
-		m.tailFollow = false
-		m.tailScroll = 0
+		m.logFollow = false
+		m.logScroll = 0
 		return m, nil
 	case "end":
-		m.tailFollow = true
-		visibleLines := max(m.height-4, 1)
-		maxScroll := max(len(m.tailLines)-visibleLines, 0)
-		m.tailScroll = maxScroll
+		m.logFollow = true
+		maxScroll := max(len(m.logLines)-m.logVisibleLines(), 0)
+		m.logScroll = maxScroll
 		return m, nil
 	case "g", "G":
-		visibleLines := max(m.height-4, 1)
-		maxScroll := max(len(m.tailLines)-visibleLines, 0)
-		if m.tailScroll == 0 {
-			m.tailFollow = true
-			m.tailScroll = maxScroll
+		maxScroll := max(len(m.logLines)-m.logVisibleLines(), 0)
+		if m.logScroll == 0 {
+			m.logFollow = true
+			m.logScroll = maxScroll
 		} else {
-			m.tailFollow = false
-			m.tailScroll = 0
+			m.logFollow = false
+			m.logScroll = 0
 		}
 		return m, tea.ClearScreen
+	case "left":
+		return m.handlePrevKey()
+	case "right":
+		return m.handleNextKey()
 	case "?":
 		m.helpFromView = m.currentView
 		m.currentView = tuiViewHelp
@@ -344,11 +342,11 @@ func (m tuiModel) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHomeKey()
 	case "up":
 		return m.handleUpKey()
-	case "k", "right":
+	case "k", "left":
 		return m.handlePrevKey()
 	case "down":
 		return m.handleDownKey()
-	case "j", "left":
+	case "j", "right":
 		return m.handleNextKey()
 	case "pgup":
 		return m.handlePageUpKey()
@@ -364,8 +362,8 @@ func (m tuiModel) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCancelKey()
 	case "r":
 		return m.handleRerunKey()
-	case "t":
-		return m.handleTailKey2()
+	case "l", "t":
+		return m.handleLogKey2()
 	case "f":
 		return m.handleFilterOpenKey()
 	case "b":
@@ -534,6 +532,32 @@ func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
 			m.flashView = tuiViewPrompt
 		}
+	case tuiViewLog:
+		if m.logFromView == tuiViewTasks {
+			idx := m.findPrevLoggableFixJob()
+			if idx >= 0 {
+				m.fixSelectedIdx = idx
+				job := m.fixJobs[idx]
+				m.logStreaming = false
+				return m.openLogView(
+					job.ID, job.Status, tuiViewTasks,
+				)
+			}
+		} else {
+			prevIdx := m.findPrevLoggableJob()
+			if prevIdx >= 0 {
+				m.selectedIdx = prevIdx
+				m.updateSelectedJobID()
+				job := m.jobs[prevIdx]
+				m.logStreaming = false
+				return m.openLogView(
+					job.ID, job.Status, m.logFromView,
+				)
+			}
+		}
+		m.flashMessage = "No newer log"
+		m.flashExpiresAt = time.Now().Add(2 * time.Second)
+		m.flashView = tuiViewLog
 	}
 	return m, nil
 }
@@ -634,6 +658,36 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
 			m.flashView = tuiViewPrompt
 		}
+	case tuiViewLog:
+		if m.logFromView == tuiViewTasks {
+			idx := m.findNextLoggableFixJob()
+			if idx >= 0 {
+				m.fixSelectedIdx = idx
+				job := m.fixJobs[idx]
+				m.logStreaming = false
+				return m.openLogView(
+					job.ID, job.Status, tuiViewTasks,
+				)
+			}
+		} else {
+			nextIdx := m.findNextLoggableJob()
+			if nextIdx >= 0 {
+				m.selectedIdx = nextIdx
+				m.updateSelectedJobID()
+				job := m.jobs[nextIdx]
+				m.logStreaming = false
+				return m.openLogView(
+					job.ID, job.Status, m.logFromView,
+				)
+			} else if m.canPaginate() {
+				m.loadingMore = true
+				m.paginateNav = tuiViewLog
+				return m, m.fetchMoreJobs()
+			}
+		}
+		m.flashMessage = "No older log"
+		m.flashExpiresAt = time.Now().Add(2 * time.Second)
+		m.flashView = tuiViewLog
 	}
 	return m, nil
 }
@@ -871,20 +925,11 @@ func (m tuiModel) handleRerunKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleTailKey2() (tea.Model, tea.Cmd) {
-	// From prompt view: allow tailing the running job being viewed
+func (m tuiModel) handleLogKey2() (tea.Model, tea.Cmd) {
+	// From prompt view: view log for the job being viewed
 	if m.currentView == tuiViewPrompt && m.currentReview != nil && m.currentReview.Job != nil {
 		job := m.currentReview.Job
-		if job.Status == storage.JobStatusRunning {
-			m.tailJobID = job.ID
-			m.tailLines = nil
-			m.tailScroll = 0
-			m.tailStreaming = true
-			m.tailFollow = true
-			m.tailFromView = m.reviewFromView
-			m.currentView = tuiViewTail
-			return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
-		}
+		return m.openLogView(job.ID, job.Status, m.reviewFromView)
 	}
 
 	if m.currentView != tuiViewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
@@ -892,21 +937,42 @@ func (m tuiModel) handleTailKey2() (tea.Model, tea.Cmd) {
 	}
 	job := m.jobs[m.selectedIdx]
 	switch job.Status {
-	case storage.JobStatusRunning:
-		m.tailJobID = job.ID
-		m.tailLines = nil
-		m.tailScroll = 0
-		m.tailStreaming = true
-		m.tailFollow = true
-		m.tailFromView = tuiViewQueue
-		m.currentView = tuiViewTail
-		return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
 	case storage.JobStatusQueued:
 		m.flashMessage = "Job is queued - not yet running"
 		m.flashExpiresAt = time.Now().Add(2 * time.Second)
 		m.flashView = tuiViewQueue
+		return m, nil
+	default:
+		return m.openLogView(job.ID, job.Status, tuiViewQueue)
 	}
-	return m, nil
+}
+
+// openLogView opens the log view for a job of any status.
+// Running jobs stream with follow; completed jobs show a static view.
+func (m tuiModel) openLogView(
+	jobID int64, status storage.JobStatus, fromView tuiView,
+) (tea.Model, tea.Cmd) {
+	m.logJobID = jobID
+	m.logLines = nil
+	m.logScroll = 0
+	m.logFromView = fromView
+	m.currentView = tuiViewLog
+	m.logOffset = 0
+	m.logFmtr = newStreamFormatterWithWidth(
+		io.Discard, m.width, m.glamourStyle,
+	)
+	m.logFetchSeq++
+	m.logLoading = true
+
+	if status == storage.JobStatusRunning {
+		m.logStreaming = true
+		m.logFollow = true
+	} else {
+		m.logStreaming = false
+		m.logFollow = false
+	}
+
+	return m, tea.Batch(tea.ClearScreen, m.fetchJobLog(jobID))
 }
 
 func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
@@ -1033,7 +1099,7 @@ func (m tuiModel) handleHelpKey() (tea.Model, tea.Cmd) {
 		m.currentView = m.helpFromView
 		return m, nil
 	}
-	if m.currentView == tuiViewQueue || m.currentView == tuiViewReview || m.currentView == tuiViewPrompt || m.currentView == tuiViewTail {
+	if m.currentView == tuiViewQueue || m.currentView == tuiViewReview || m.currentView == tuiViewPrompt || m.currentView == tuiViewLog {
 		m.helpFromView = m.currentView
 		m.currentView = tuiViewHelp
 		m.helpScroll = 0
@@ -1282,6 +1348,16 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		case tuiViewLog:
+			nextIdx := m.findNextLoggableJob()
+			if nextIdx >= 0 {
+				m.selectedIdx = nextIdx
+				m.updateSelectedJobID()
+				job := m.jobs[nextIdx]
+				return m.openLogView(
+					job.ID, job.Status, m.logFromView,
+				)
+			}
 		}
 	} else if !msg.append && !m.loadingMore {
 		m.paginateNav = 0
@@ -1477,7 +1553,7 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
-		// View task: prompt for running, review for done/applied, error for failed
+		// View task: prompt for running, review for done/applied, log for failed
 		if len(m.fixJobs) > 0 && m.fixSelectedIdx < len(m.fixJobs) {
 			job := m.fixJobs[m.fixSelectedIdx]
 			switch {
@@ -1494,57 +1570,28 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.promptFromQueue = false
 					return m, nil
 				}
-				// No prompt yet, go straight to tail
-				m.tailJobID = job.ID
-				m.tailLines = nil
-				m.tailScroll = 0
-				m.tailStreaming = true
-				m.tailFollow = true
-				m.tailFromView = tuiViewTasks
-				m.currentView = tuiViewTail
-				return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
+				// No prompt yet, go straight to log view
+				return m.openLogView(job.ID, job.Status, tuiViewTasks)
 			case job.HasViewableOutput():
 				m.selectedJobID = job.ID
 				m.reviewFromView = tuiViewTasks
 				return m, m.fetchReview(job.ID)
 			case job.Status == storage.JobStatusFailed:
-				errMsg := job.Error
-				if errMsg == "" {
-					errMsg = "unknown error"
-				}
-				m.flashMessage = fmt.Sprintf("Job #%d failed: %s", job.ID, errMsg)
-				m.flashExpiresAt = time.Now().Add(5 * time.Second)
-				m.flashView = tuiViewTasks
+				return m.openLogView(job.ID, job.Status, tuiViewTasks)
 			}
 		}
 		return m, nil
-	case "t":
-		// Tail output: live for running jobs, review for done, error for failed
+	case "l", "t":
+		// View agent log for any non-queued job
 		if len(m.fixJobs) > 0 && m.fixSelectedIdx < len(m.fixJobs) {
 			job := m.fixJobs[m.fixSelectedIdx]
-			switch {
-			case job.Status == storage.JobStatusRunning:
-				m.tailJobID = job.ID
-				m.tailLines = nil
-				m.tailScroll = 0
-				m.tailStreaming = true
-				m.tailFollow = true
-				m.tailFromView = tuiViewTasks
-				m.currentView = tuiViewTail
-				return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
-			case job.HasViewableOutput():
-				m.selectedJobID = job.ID
-				m.reviewFromView = tuiViewTasks
-				return m, m.fetchReview(job.ID)
-			case job.Status == storage.JobStatusFailed:
-				errMsg := job.Error
-				if errMsg == "" {
-					errMsg = "unknown error"
-				}
-				m.flashMessage = fmt.Sprintf("Job #%d failed: %s", job.ID, errMsg)
-				m.flashExpiresAt = time.Now().Add(5 * time.Second)
+			if job.Status == storage.JobStatusQueued {
+				m.flashMessage = "Job is queued - not yet running"
+				m.flashExpiresAt = time.Now().Add(2 * time.Second)
 				m.flashView = tuiViewTasks
+				return m, nil
 			}
+			return m.openLogView(job.ID, job.Status, tuiViewTasks)
 		}
 		return m, nil
 	case "A":

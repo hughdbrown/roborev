@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -83,6 +84,7 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	mux.HandleFunc("/api/jobs", s.handleListJobs)
 	mux.HandleFunc("/api/job/cancel", s.handleCancelJob)
 	mux.HandleFunc("/api/job/output", s.handleJobOutput)
+	mux.HandleFunc("/api/job/log", s.handleJobLog)
 	mux.HandleFunc("/api/job/rerun", s.handleRerunJob)
 	mux.HandleFunc("/api/job/update-branch", s.handleUpdateJobBranch)
 	mux.HandleFunc("/api/repos", s.handleListRepos)
@@ -1155,6 +1157,159 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleJobLog serves the raw JSONL log file for a job.
+// The TUI and CLI use this to render formatted agent output.
+//
+// Supports incremental fetching via the "offset" query param
+// (byte offset into the log file). The response includes an
+// X-Log-Offset header with the end position — the client passes
+// this as offset on the next poll to get only new content.
+//
+// For running jobs, the end position is snapped to the last
+// newline boundary to avoid serving partial JSONL lines.
+func (s *Server) handleJobLog(
+	w http.ResponseWriter, r *http.Request,
+) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	jobIDStr := r.URL.Query().Get("job_id")
+	if jobIDStr == "" {
+		writeError(w, http.StatusBadRequest, "job_id required")
+		return
+	}
+
+	jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid job_id")
+		return
+	}
+
+	var offset int64
+	if v := r.URL.Query().Get("offset"); v != "" {
+		offset, err = strconv.ParseInt(v, 10, 64)
+		if err != nil || offset < 0 {
+			writeError(w, http.StatusBadRequest, "invalid offset")
+			return
+		}
+	}
+
+	job, err := s.db.GetJobByID(jobID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	f, err := os.Open(JobLogPath(jobID))
+	if err != nil {
+		// Running job with no log file yet (startup race):
+		// return empty 200 so the TUI keeps polling.
+		if errors.Is(err, os.ErrNotExist) &&
+			job.Status == storage.JobStatusRunning {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("X-Job-Status", string(job.Status))
+			w.Header().Set("X-Log-Offset", "0")
+			return
+		}
+		writeError(w, http.StatusNotFound, "no log file for this job")
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		writeError(
+			w, http.StatusInternalServerError,
+			"stat log file",
+		)
+		return
+	}
+	fileSize := fi.Size()
+
+	// Clamp offset if beyond file size (truncated/rotated log).
+	if offset > fileSize {
+		offset = 0
+	}
+
+	endPos := fileSize
+	if job.Status == storage.JobStatusRunning {
+		endPos = jobLogSafeEnd(f, fileSize)
+	}
+
+	// Clamp offset to endPos.
+	if offset > endPos {
+		offset = endPos
+	}
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		writeError(
+			w, http.StatusInternalServerError,
+			"seek log file",
+		)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Job-Status", string(job.Status))
+	w.Header().Set(
+		"X-Log-Offset", strconv.FormatInt(endPos, 10),
+	)
+
+	n := endPos - offset
+	if n > 0 {
+		if _, err := io.CopyN(w, f, n); err != nil {
+			log.Printf(
+				"handleJobLog: write error for job %d: %v",
+				jobID, err,
+			)
+		}
+	}
+}
+
+// jobLogSafeEnd returns the byte position of the last complete
+// JSONL line in the file (i.e. up to and including the last '\n').
+// For completed jobs this equals fileSize; for running jobs it
+// avoids serving a partial line being written concurrently.
+func jobLogSafeEnd(f *os.File, fileSize int64) int64 {
+	if fileSize == 0 {
+		return 0
+	}
+
+	// Check if last byte is newline — common case.
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], fileSize-1); err != nil {
+		return fileSize
+	}
+	if last[0] == '\n' {
+		return fileSize
+	}
+
+	// Scan backwards in 64KB chunks to find last newline.
+	const chunkSize = 64 * 1024
+	buf := make([]byte, chunkSize)
+	pos := fileSize
+	for pos > 0 {
+		readStart := max(pos-chunkSize, 0)
+		readLen := pos - readStart
+		n, err := f.ReadAt(buf[:readLen], readStart)
+		if err != nil && err != io.EOF {
+			return fileSize
+		}
+		for i := n - 1; i >= 0; i-- {
+			if buf[i] == '\n' {
+				return readStart + int64(i) + 1
+			}
+		}
+		pos = readStart
+	}
+
+	// Entire file has no newline — serve nothing to avoid
+	// a partial line.
+	return 0
 }
 
 func writeNDJSON(w http.ResponseWriter, v any) bool {

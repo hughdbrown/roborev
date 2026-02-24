@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"fmt"
@@ -8,25 +8,24 @@ import (
 	"github.com/roborev-dev/roborev/internal/testenv"
 )
 
-// TestMain isolates the entire test package from the real ~/.roborev directory
-// and disables external I/O in newTuiModel (daemon detection, config loading,
-// git subprocess spawning). Without skipExternalIO, the 200+ tests that call
-// newTuiModel each spawn git subprocesses, exhausting macOS CI runner resources.
+// TestMain isolates the entire daemon test package from the production
+// ~/.roborev directory. Without this, NewServer creates activity/error
+// logs at DefaultActivityLogPath() → ~/.roborev/activity.log, polluting
+// the production log with test events and confusing running TUIs.
 func TestMain(m *testing.M) {
 	os.Exit(runTests(m))
 }
 
 func runTests(m *testing.M) int {
-	skipExternalIO = true
-
 	// Snapshot prod log state BEFORE overriding ROBOREV_DATA_DIR.
 	barrier := testenv.NewProdLogBarrier(
 		testenv.DefaultProdDataDir(),
 	)
 
-	tmpDir, err := os.MkdirTemp("", "roborev-test-*")
+	tmpDir, err := os.MkdirTemp("", "roborev-daemon-test-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
+		fmt.Fprintf(os.Stderr,
+			"failed to create temp dir: %v\n", err)
 		return 1
 	}
 	defer os.RemoveAll(tmpDir)

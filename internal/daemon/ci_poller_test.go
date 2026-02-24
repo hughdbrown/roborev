@@ -1627,6 +1627,52 @@ func TestCloneRemoteMatches(t *testing.T) {
 		}
 	})
 
+	t.Run("missing git config returns false nil", func(t *testing.T) {
+		// A repo where .git/config was deleted should be treated
+		// as no-origin (false, nil), not an operational error.
+		dir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main", dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %s: %s", err, out)
+		}
+		cfgPath := filepath.Join(dir, ".git", "config")
+		if err := os.Remove(cfgPath); err != nil {
+			t.Fatalf("remove .git/config: %v", err)
+		}
+
+		ok, err := cloneRemoteMatches(dir, "acme/any")
+		if err != nil {
+			t.Fatalf(
+				"expected nil error for missing config, got: %v",
+				err,
+			)
+		}
+		if ok {
+			t.Error("expected false for missing .git/config")
+		}
+	})
+
+	t.Run("corrupted git config returns error", func(t *testing.T) {
+		// A repo with malformed .git/config is an operational
+		// failure, not a missing-origin signal.
+		dir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main", dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %s: %s", err, out)
+		}
+		cfgPath := filepath.Join(dir, ".git", "config")
+		if err := os.WriteFile(
+			cfgPath, []byte("<<<bad config>>>"), 0o644,
+		); err != nil {
+			t.Fatalf("write corrupt config: %v", err)
+		}
+
+		_, err := cloneRemoteMatches(dir, "acme/any")
+		if err == nil {
+			t.Fatal("expected error for corrupted .git/config")
+		}
+	})
+
 	t.Run("insteadOf rewrite resolves correctly", func(t *testing.T) {
 		dir := t.TempDir()
 		// Init repo with an aliased remote URL.

@@ -227,7 +227,7 @@ func TestTUIReviewNavigation(t *testing.T) {
 			wantCmd:       false,
 		},
 		{
-			name: "Left Arrow acts like J (Next)",
+			name: "Left Arrow acts like K (Prev)",
 			initialJobs: []storage.ReviewJob{
 				makeJob(1),
 				makeJob(2),
@@ -236,12 +236,12 @@ func TestTUIReviewNavigation(t *testing.T) {
 			initialIdx: 1,
 			initialID:  2,
 			key:        tea.KeyLeft,
-			wantIdx:    2,
-			wantJobID:  3,
+			wantIdx:    0,
+			wantJobID:  1,
 			wantCmd:    true,
 		},
 		{
-			name: "Right Arrow acts like K (Prev)",
+			name: "Right Arrow acts like J (Next)",
 			initialJobs: []storage.ReviewJob{
 				makeJob(1),
 				makeJob(2),
@@ -250,8 +250,8 @@ func TestTUIReviewNavigation(t *testing.T) {
 			initialIdx: 1,
 			initialID:  2,
 			key:        tea.KeyRight,
-			wantIdx:    0,
-			wantJobID:  1,
+			wantIdx:    2,
+			wantJobID:  3,
 			wantCmd:    true,
 		},
 		{
@@ -2369,65 +2369,70 @@ func TestFormatClipboardContent(t *testing.T) {
 	}
 }
 
-func TestTUITailOutputPreservesLinesOnEmptyResponse(t *testing.T) {
-	// Test that when a job completes and the server returns empty lines
-	// (because the buffer was closed), the TUI preserves the existing lines.
+func TestTUILogOutputPreservesLinesOnEmptyResponse(t *testing.T) {
+	// When a completed job's incremental poll returns no new data,
+	// the TUI should preserve existing lines. In the incremental
+	// flow, this is an append with no new lines (offset unchanged).
 	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewTail
-	m.tailJobID = 1
-	m.tailStreaming = true
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logFetchSeq = 1
 	m.height = 30
 
 	// Set up initial lines as if we had been streaming output
-	m.tailLines = []tailLine{
-		{timestamp: time.Now(), text: "Line 1", lineType: "text"},
-		{timestamp: time.Now(), text: "Line 2", lineType: "text"},
-		{timestamp: time.Now(), text: "Line 3", lineType: "text"},
+	m.logLines = []logLine{
+		{text: "Line 1"},
+		{text: "Line 2"},
+		{text: "Line 3"},
 	}
 
-	// Simulate job completion: server returns empty lines, hasMore=false
-	emptyMsg := tuiTailOutputMsg{
-		lines:   []tailLine{},
+	// Simulate job completion: incremental poll returns no new
+	// lines (append mode, offset unchanged).
+	emptyMsg := tuiLogOutputMsg{
+		lines:   []logLine{},
 		hasMore: false,
 		err:     nil,
+		append:  true,
+		seq:     1,
 	}
 
 	m2, _ := updateModel(t, m, emptyMsg)
 
 	// Lines should be preserved (not cleared)
-	if len(m2.tailLines) != 3 {
-		t.Fatalf("Expected 3 lines preserved, got %d", len(m2.tailLines))
+	if len(m2.logLines) != 3 {
+		t.Fatalf("Expected 3 lines preserved, got %d", len(m2.logLines))
 	}
 
 	// Streaming should stop
-	if m2.tailStreaming {
-		t.Error("Expected tailStreaming to be false after job completes")
+	if m2.logStreaming {
+		t.Error("Expected logStreaming to be false after job completes")
 	}
 
 	// Verify the original content is still there
-	if m2.tailLines[0].text != "Line 1" {
-		t.Errorf("Expected 'Line 1', got %q", m2.tailLines[0].text)
+	if m2.logLines[0].text != "Line 1" {
+		t.Errorf("Expected 'Line 1', got %q", m2.logLines[0].text)
 	}
 }
 
-func TestTUITailOutputUpdatesLinesWhenStreaming(t *testing.T) {
+func TestTUILogOutputUpdatesLinesWhenStreaming(t *testing.T) {
 	// Test that when streaming and new lines arrive, they are updated
 	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewTail
-	m.tailJobID = 1
-	m.tailStreaming = true
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
 	m.height = 30
 
 	// Set up initial lines
-	m.tailLines = []tailLine{
-		{timestamp: time.Now(), text: "Old line", lineType: "text"},
+	m.logLines = []logLine{
+		{text: "Old line"},
 	}
 
 	// New lines arrive while still streaming
-	newMsg := tuiTailOutputMsg{
-		lines: []tailLine{
-			{timestamp: time.Now(), text: "Old line", lineType: "text"},
-			{timestamp: time.Now(), text: "New line", lineType: "text"},
+	newMsg := tuiLogOutputMsg{
+		lines: []logLine{
+			{text: "Old line"},
+			{text: "New line"},
 		},
 		hasMore: true, // Still streaming
 		err:     nil,
@@ -2436,31 +2441,237 @@ func TestTUITailOutputUpdatesLinesWhenStreaming(t *testing.T) {
 	m2, _ := updateModel(t, m, newMsg)
 
 	// Lines should be updated
-	if len(m2.tailLines) != 2 {
-		t.Errorf("Expected 2 lines, got %d", len(m2.tailLines))
+	if len(m2.logLines) != 2 {
+		t.Errorf("Expected 2 lines, got %d", len(m2.logLines))
 	}
 
 	// Streaming should continue
-	if !m2.tailStreaming {
-		t.Error("Expected tailStreaming to be true while job is running")
+	if !m2.logStreaming {
+		t.Error("Expected logStreaming to be true while job is running")
 	}
 }
 
-func TestTUITailOutputIgnoredWhenNotInTailView(t *testing.T) {
-	// Test that tail output messages are ignored when not in tail view
+func TestTUILogOutputErrNoLogShowsJobError(t *testing.T) {
+	// When a failed job has no log file, the flash message should
+	// contain the stored error instead of a generic message.
 	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewQueue // Not in tail view
-	m.tailJobID = 1
-
-	// Existing lines from a previous tail session
-	m.tailLines = []tailLine{
-		{timestamp: time.Now(), text: "Previous session line", lineType: "text"},
+	m.currentView = tuiViewLog
+	m.logJobID = 42
+	m.logFromView = tuiViewQueue
+	m.logStreaming = false
+	m.height = 30
+	m.jobs = []storage.ReviewJob{
+		makeJob(42,
+			withStatus(storage.JobStatusFailed),
+			withError("agent timeout after 300s"),
+		),
 	}
 
-	// New lines arrive (stale message from previous tail)
-	msg := tuiTailOutputMsg{
-		lines: []tailLine{
-			{timestamp: time.Now(), text: "Should be ignored", lineType: "text"},
+	msg := tuiLogOutputMsg{err: errNoLog}
+	m2, _ := updateModel(t, m, msg)
+
+	// Should return to previous view.
+	if m2.currentView != tuiViewQueue {
+		t.Errorf("expected queue view, got %d", m2.currentView)
+	}
+	// Flash should contain the stored error.
+	if !strings.Contains(m2.flashMessage, "agent timeout") {
+		t.Errorf("flash should contain job error, got %q",
+			m2.flashMessage)
+	}
+	if !strings.Contains(m2.flashMessage, "42") {
+		t.Errorf("flash should contain job ID, got %q",
+			m2.flashMessage)
+	}
+}
+
+func TestTUILogOutputErrNoLogGenericForNonFailed(t *testing.T) {
+	// For a done (non-failed) job with no log, the flash should
+	// be the generic "No log available" message.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 10
+	m.logFromView = tuiViewQueue
+	m.height = 30
+	m.jobs = []storage.ReviewJob{
+		makeJob(10, withStatus(storage.JobStatusDone)),
+	}
+
+	msg := tuiLogOutputMsg{err: errNoLog}
+	m2, _ := updateModel(t, m, msg)
+
+	if m2.currentView != tuiViewQueue {
+		t.Errorf("expected queue view, got %d", m2.currentView)
+	}
+	if m2.flashMessage != "No log available for this job" {
+		t.Errorf("expected generic flash, got %q", m2.flashMessage)
+	}
+}
+
+func TestTUILogOutputRunningJobKeepsWaiting(t *testing.T) {
+	// Running job with empty first fetch should keep logLines nil
+	// so the UI shows "Waiting for output..." instead of "(no output)".
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logLines = nil // first fetch
+	m.height = 30
+
+	// Empty lines, still streaming.
+	msg := tuiLogOutputMsg{
+		lines:   nil,
+		hasMore: true,
+	}
+	m2, _ := updateModel(t, m, msg)
+
+	if m2.logLines != nil {
+		t.Errorf("logLines should stay nil for running empty fetch, got %v",
+			m2.logLines)
+	}
+	if !m2.logStreaming {
+		t.Error("logStreaming should remain true")
+	}
+}
+
+func TestTUILogVisibleLinesWithCommandHeader(t *testing.T) {
+	// logVisibleLines() should account for the command-line header
+	// when the job has a known agent with a command line.
+	m := newTuiModel("http://localhost")
+	m.height = 30
+	m.logJobID = 1
+
+	// Job without agent (no command line header).
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withAgent("")),
+	}
+	noHeader := m.logVisibleLines()
+
+	// Job with "test" agent (has a command line).
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withAgent("test")),
+	}
+	withHeader := m.logVisibleLines()
+
+	// With command header should have one fewer visible line.
+	if noHeader-withHeader != 1 {
+		t.Errorf("command header should reduce visible lines by 1: "+
+			"noHeader=%d withHeader=%d", noHeader, withHeader)
+	}
+}
+
+func TestTUILogPagingUsesLogVisibleLines(t *testing.T) {
+	// pgdown/end/g in log view should use logVisibleLines() for
+	// scroll calculations, correctly accounting for headers.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.height = 20
+	m.logScroll = 0
+	m.logFollow = false
+
+	// Use "test" agent to get command header.
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withAgent("test")),
+	}
+
+	// Create enough lines to need scrolling.
+	for i := range 50 {
+		m.logLines = append(m.logLines,
+			logLine{text: fmt.Sprintf("line %d", i)})
+	}
+
+	visLines := m.logVisibleLines()
+
+	// pgdown should advance by logVisibleLines().
+	m2, _ := pressSpecial(m, tea.KeyPgDown)
+	if m2.logScroll != visLines {
+		t.Errorf("pgdown: expected scroll=%d, got %d",
+			visLines, m2.logScroll)
+	}
+
+	// end should set scroll to max using logVisibleLines().
+	m3, _ := pressSpecial(m, tea.KeyEnd)
+	expectedMax := max(50-visLines, 0)
+	if m3.logScroll != expectedMax {
+		t.Errorf("end: expected scroll=%d, got %d",
+			expectedMax, m3.logScroll)
+	}
+
+	// 'g' from top should jump to bottom using logVisibleLines().
+	m4, _ := pressKeys(m, []rune{'g'})
+	if m4.logScroll != expectedMax {
+		t.Errorf("g from top: expected scroll=%d, got %d",
+			expectedMax, m4.logScroll)
+	}
+
+	// pgup from mid-scroll should retreat by logVisibleLines().
+	mMid := m
+	mMid.logScroll = 2 * visLines // start 2 pages down
+	m5, _ := pressSpecial(mMid, tea.KeyPgUp)
+	if m5.logScroll != visLines {
+		t.Errorf("pgup: expected scroll=%d, got %d",
+			visLines, m5.logScroll)
+	}
+
+	// pgup at top should clamp to 0.
+	m6, _ := pressSpecial(m, tea.KeyPgUp)
+	if m6.logScroll != 0 {
+		t.Errorf("pgup at top: expected scroll=0, got %d",
+			m6.logScroll)
+	}
+}
+
+func TestTUILogPagingNoHeader(t *testing.T) {
+	// Same paging test but without command header (no agent).
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.height = 20
+	m.logScroll = 0
+	m.logFollow = false
+
+	// No agent → no command header.
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withAgent("")),
+	}
+
+	for i := range 50 {
+		m.logLines = append(m.logLines,
+			logLine{text: fmt.Sprintf("line %d", i)})
+	}
+
+	visLines := m.logVisibleLines()
+	expectedMax := max(50-visLines, 0)
+
+	m2, _ := pressSpecial(m, tea.KeyPgDown)
+	if m2.logScroll != visLines {
+		t.Errorf("pgdown no-header: expected scroll=%d, got %d",
+			visLines, m2.logScroll)
+	}
+
+	m3, _ := pressSpecial(m, tea.KeyEnd)
+	if m3.logScroll != expectedMax {
+		t.Errorf("end no-header: expected scroll=%d, got %d",
+			expectedMax, m3.logScroll)
+	}
+}
+
+func TestTUILogOutputIgnoredWhenNotInLogView(t *testing.T) {
+	// Test that log output messages are ignored when not in log view.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue // Not in log view
+	m.logJobID = 1
+
+	// Existing lines from a previous log session.
+	m.logLines = []logLine{
+		{text: "Previous session line"},
+	}
+
+	// New lines arrive (stale message from previous log session).
+	msg := tuiLogOutputMsg{
+		lines: []logLine{
+			{text: "Should be ignored"},
 		},
 		hasMore: false,
 		err:     nil,
@@ -2468,12 +2679,475 @@ func TestTUITailOutputIgnoredWhenNotInTailView(t *testing.T) {
 
 	m2, _ := updateModel(t, m, msg)
 
-	// Lines should not be updated since we're not in tail view
-	if len(m2.tailLines) != 1 {
-		t.Fatalf("Expected 1 line (unchanged), got %d", len(m2.tailLines))
+	// Lines should not be updated since we're not in log view.
+	if len(m2.logLines) != 1 {
+		t.Fatalf("Expected 1 line (unchanged), got %d", len(m2.logLines))
 	}
-	if m2.tailLines[0].text != "Previous session line" {
-		t.Errorf("Lines should not be updated when not in tail view")
+	if m2.logLines[0].text != "Previous session line" {
+		t.Errorf("Lines should not be updated when not in log view")
+	}
+}
+
+func TestTUILogOutputAppendMode(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.height = 30
+
+	// Simulate first fetch (replace mode).
+	m.logLines = []logLine{
+		{text: "Line 1"},
+		{text: "Line 2"},
+	}
+	m.logOffset = 100
+
+	// Incremental append with new lines.
+	msg := tuiLogOutputMsg{
+		lines: []logLine{
+			{text: "Line 3"},
+			{text: "Line 4"},
+		},
+		hasMore:   true,
+		newOffset: 200,
+		append:    true,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if len(m2.logLines) != 4 {
+		t.Fatalf("expected 4 lines, got %d", len(m2.logLines))
+	}
+	if m2.logLines[0].text != "Line 1" {
+		t.Errorf("first line should be preserved")
+	}
+	if m2.logLines[2].text != "Line 3" {
+		t.Errorf("appended line should be Line 3, got %q",
+			m2.logLines[2].text)
+	}
+	if m2.logOffset != 200 {
+		t.Errorf("logOffset = %d, want 200", m2.logOffset)
+	}
+}
+
+func TestTUILogOutputAppendNoNewLines(t *testing.T) {
+	// When append=true but no new lines, existing lines
+	// should be preserved unchanged.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.height = 30
+	m.logOffset = 100
+
+	m.logLines = []logLine{
+		{text: "Existing"},
+	}
+
+	msg := tuiLogOutputMsg{
+		hasMore:   true,
+		newOffset: 100,
+		append:    true,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if len(m2.logLines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(m2.logLines))
+	}
+	if m2.logLines[0].text != "Existing" {
+		t.Errorf("existing line should be preserved")
+	}
+}
+
+func TestTUILogOutputReplaceMode(t *testing.T) {
+	// When append=false, lines should be fully replaced.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = false
+	m.height = 30
+
+	m.logLines = []logLine{
+		{text: "Old line 1"},
+		{text: "Old line 2"},
+	}
+
+	msg := tuiLogOutputMsg{
+		lines: []logLine{
+			{text: "New line 1"},
+		},
+		hasMore:   false,
+		newOffset: 50,
+		append:    false,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if len(m2.logLines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(m2.logLines))
+	}
+	if m2.logLines[0].text != "New line 1" {
+		t.Errorf("line should be replaced")
+	}
+	if m2.logOffset != 50 {
+		t.Errorf("logOffset = %d, want 50", m2.logOffset)
+	}
+}
+
+func TestTUILogOutputStaleSeqDropped(t *testing.T) {
+	// Messages with a stale seq should be silently dropped.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logFetchSeq = 5
+	m.logLoading = true // current-seq fetch is in-flight
+	m.height = 30
+
+	m.logLines = []logLine{{text: "Current"}}
+
+	msg := tuiLogOutputMsg{
+		lines:     []logLine{{text: "Stale data"}},
+		hasMore:   true,
+		newOffset: 999,
+		append:    false,
+		seq:       3, // older than m.logFetchSeq
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	// Lines and offset should be unchanged.
+	if len(m2.logLines) != 1 || m2.logLines[0].text != "Current" {
+		t.Errorf("stale msg should not update lines")
+	}
+	if m2.logOffset != 0 {
+		t.Errorf(
+			"stale msg should not update offset, got %d",
+			m2.logOffset,
+		)
+	}
+	// logLoading must remain true — stale responses must not
+	// clear the in-flight guard for the current session.
+	if !m2.logLoading {
+		t.Error("stale msg should not clear logLoading")
+	}
+}
+
+func TestTUILogOutputOffsetReset(t *testing.T) {
+	// When server resets offset (newOffset < previous offset),
+	// lines should be replaced, not appended.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logFetchSeq = 1
+	m.logOffset = 500
+	m.height = 30
+
+	m.logLines = []logLine{
+		{text: "Old line 1"},
+		{text: "Old line 2"},
+	}
+
+	// Server reset: newOffset=100, append=false (reset path).
+	msg := tuiLogOutputMsg{
+		lines: []logLine{
+			{text: "Reset line 1"},
+		},
+		hasMore:   true,
+		newOffset: 100,
+		append:    false,
+		seq:       1,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if len(m2.logLines) != 1 {
+		t.Fatalf("expected 1 line after reset, got %d",
+			len(m2.logLines))
+	}
+	if m2.logLines[0].text != "Reset line 1" {
+		t.Errorf("expected reset content, got %q",
+			m2.logLines[0].text)
+	}
+	if m2.logOffset != 100 {
+		t.Errorf("logOffset = %d, want 100", m2.logOffset)
+	}
+}
+
+func TestTUILogLoadingGuard(t *testing.T) {
+	// When logLoading is true, tuiLogTickMsg should not start
+	// another fetch.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logLoading = true
+	m.height = 30
+
+	m2, cmd := updateModel(t, m, tuiLogTickMsg{})
+
+	// Should not issue a fetch command.
+	if cmd != nil {
+		t.Errorf("expected nil cmd when logLoading, got %T", cmd)
+	}
+	if !m2.logLoading {
+		t.Error("logLoading should remain true")
+	}
+}
+
+func TestTUILogOutputReplaceModeEmptyClearsStale(t *testing.T) {
+	// Replace mode with zero lines should clear stale content
+	// (e.g. after log truncation/reset).
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logFetchSeq = 1
+	m.height = 30
+
+	m.logLines = []logLine{
+		{text: "Stale line 1"},
+		{text: "Stale line 2"},
+	}
+
+	msg := tuiLogOutputMsg{
+		lines:     nil,
+		hasMore:   false,
+		newOffset: 0,
+		append:    false,
+		seq:       1,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if m2.logLines == nil {
+		t.Fatal("logLines should be empty slice, not nil")
+	}
+	if len(m2.logLines) != 0 {
+		t.Errorf(
+			"expected 0 lines after empty replace, got %d",
+			len(m2.logLines),
+		)
+	}
+}
+
+func TestTUILogOutputPersistsFormatter(t *testing.T) {
+	// The formatter returned in tuiLogOutputMsg should be
+	// persisted into m.logFmtr for incremental reuse.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 1
+	m.logStreaming = true
+	m.logFetchSeq = 1
+	m.height = 30
+
+	fmtr := newStreamFormatter(nil, true)
+	fmtr.hasOutput = true // simulate accumulated state
+
+	msg := tuiLogOutputMsg{
+		lines:     []logLine{{text: "Line 1"}},
+		hasMore:   true,
+		newOffset: 100,
+		append:    false,
+		seq:       1,
+		fmtr:      fmtr,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if m2.logFmtr != fmtr {
+		t.Error("logFmtr should be persisted from msg")
+	}
+	if !m2.logFmtr.hasOutput {
+		t.Error("persisted formatter should retain state")
+	}
+}
+
+func TestTUILogErrorDroppedOutsideLogView(t *testing.T) {
+	// A late-arriving error from an in-flight log fetch should
+	// not set m.err when the user has navigated away.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue // user navigated back
+	m.logFetchSeq = 3
+	m.logLoading = true
+
+	msg := tuiLogOutputMsg{
+		err: fmt.Errorf("connection reset"),
+		seq: 3,
+	}
+
+	m2, _ := updateModel(t, m, msg)
+
+	if m2.err != nil {
+		t.Errorf("error leaked into non-log view: %v", m2.err)
+	}
+	if m2.logLoading {
+		t.Error("logLoading should be cleared")
+	}
+}
+
+func TestTUILogViewLookupFixJob(t *testing.T) {
+	// renderLogView should find jobs in fixJobs when opened
+	// from the tasks view.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 42
+	m.logFromView = tuiViewTasks
+	m.logStreaming = true
+	m.height = 30
+	m.width = 80
+
+	m.fixJobs = []storage.ReviewJob{
+		{
+			ID:     42,
+			Status: storage.JobStatusRunning,
+			Agent:  "codex",
+			GitRef: "abc1234",
+		},
+	}
+	m.logLines = []logLine{{text: "output"}}
+
+	view := m.View()
+	if !strings.Contains(view, "#42") {
+		t.Error("log view should show job ID from fixJobs")
+	}
+	if !strings.Contains(view, "codex") {
+		t.Error("log view should show agent from fixJobs")
+	}
+}
+
+func TestTUILogCancelFixJob(t *testing.T) {
+	// Pressing 'x' in log view should cancel fix jobs.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 42
+	m.logFromView = tuiViewTasks
+	m.logStreaming = true
+	m.height = 30
+
+	m.fixJobs = []storage.ReviewJob{
+		{
+			ID:     42,
+			Status: storage.JobStatusRunning,
+			Agent:  "codex",
+		},
+	}
+
+	m2, cmd := pressKey(m, 'x')
+
+	if m2.logStreaming {
+		t.Error("streaming should stop after cancel")
+	}
+	if m2.fixJobs[0].Status != storage.JobStatusCanceled {
+		t.Errorf(
+			"fix job status should be canceled, got %s",
+			m2.fixJobs[0].Status,
+		)
+	}
+	if cmd == nil {
+		t.Error("expected cancel command")
+	}
+}
+
+func TestTUILogVisibleLinesFixJob(t *testing.T) {
+	// logVisibleLines must account for the command-line header
+	// when viewing a fix job (from m.fixJobs, not m.jobs).
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 42
+	m.logFromView = tuiViewTasks
+	m.height = 30
+
+	// Fix job with agent "test" produces a non-empty command line.
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 42, Status: storage.JobStatusRunning, Agent: "test"},
+	}
+	// m.jobs is empty — job only exists in fixJobs.
+	m.jobs = nil
+
+	visWithCmd := m.logVisibleLines()
+
+	// Rendered view should also show the Command: header.
+	m.logLines = []logLine{{text: "output"}}
+	m.width = 80
+	view := m.View()
+	hasCmd := strings.Contains(view, "Command:")
+
+	if !hasCmd {
+		t.Error("expected Command: header in rendered view")
+	}
+
+	// Remove the fix job so there's no command line.
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 42, Status: storage.JobStatusRunning},
+	}
+	visWithout := m.logVisibleLines()
+
+	// With the command header, one fewer visible line.
+	if visWithCmd != visWithout-1 {
+		t.Errorf(
+			"logVisibleLines mismatch: with cmd=%d, without=%d "+
+				"(expected difference of 1)",
+			visWithCmd, visWithout,
+		)
+	}
+}
+
+func TestTUILogNavFromTasks(t *testing.T) {
+	// Left/right in log view opened from tasks should navigate
+	// through fixJobs, not m.jobs.
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewLog
+	m.logJobID = 20
+	m.logFromView = tuiViewTasks
+	m.logStreaming = false
+	m.height = 30
+	m.fixSelectedIdx = 1
+
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 10, Status: storage.JobStatusDone},
+		{ID: 20, Status: storage.JobStatusRunning},
+		{ID: 30, Status: storage.JobStatusFailed},
+	}
+
+	// Should NOT navigate into m.jobs
+	m.jobs = []storage.ReviewJob{
+		{ID: 100, Status: storage.JobStatusDone},
+		{ID: 200, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 0
+
+	// Right arrow → next fix job (ID 30)
+	m2, cmd := pressSpecial(m, tea.KeyRight)
+	if cmd == nil {
+		t.Fatal("expected command from right arrow nav")
+	}
+	if m2.fixSelectedIdx != 2 {
+		t.Errorf(
+			"fixSelectedIdx should be 2, got %d",
+			m2.fixSelectedIdx,
+		)
+	}
+	// selectedIdx should not have changed
+	if m2.selectedIdx != 0 {
+		t.Errorf(
+			"selectedIdx should remain 0, got %d",
+			m2.selectedIdx,
+		)
+	}
+
+	// Left arrow from index 1 → prev fix job (ID 10)
+	m3, cmd := pressSpecial(m, tea.KeyLeft)
+	if cmd == nil {
+		t.Fatal("expected command from left arrow nav")
+	}
+	if m3.fixSelectedIdx != 0 {
+		t.Errorf(
+			"fixSelectedIdx should be 0, got %d",
+			m3.fixSelectedIdx,
+		)
 	}
 }
 

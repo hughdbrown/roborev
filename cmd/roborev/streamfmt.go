@@ -7,6 +7,32 @@ import (
 	"io"
 	"strings"
 	"unicode"
+
+	gansi "github.com/charmbracelet/glamour/ansi"
+	"github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+	"golang.org/x/term"
+)
+
+// Styles for TTY-mode stream output.
+var (
+	sfToolStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{
+			Light: "30", Dark: "51",
+		}) // Cyan — matches tuiAddressedStyle
+	sfArgStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{
+			Light: "242", Dark: "246",
+		}) // Gray — de-emphasize detail
+	sfGutterStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{
+			Light: "242", Dark: "240",
+		}) // Dim — subtle visual grouping
+	sfReasoningStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{
+			Light: "242", Dark: "243",
+		}).Italic(true) // Dim italic — thinking indicator
 )
 
 // streamFormatter wraps an io.Writer to transform raw NDJSON stream output
@@ -23,8 +49,13 @@ type streamFormatter struct {
 	w     io.Writer
 	buf   []byte
 	isTTY bool
+	width int // terminal width; 0 = no wrapping
 
-	writeErr error // first write error encountered during formatting
+	glamourStyle gansi.StyleConfig // detected once at init
+
+	writeErr    error // first write error encountered during formatting
+	lastWasTool bool  // tracks tool vs text transitions for spacing
+	hasOutput   bool  // whether any output has been written
 
 	// Tracks codex command_execution items that have already been rendered.
 	codexRenderedCommandIDs map[string]struct{}
@@ -37,7 +68,50 @@ type streamFormatter struct {
 }
 
 func newStreamFormatter(w io.Writer, isTTY bool) *streamFormatter {
-	return &streamFormatter{w: w, isTTY: isTTY}
+	f := &streamFormatter{w: w, isTTY: isTTY}
+	if isTTY {
+		f.glamourStyle = sfGlamourStyle()
+		f.width = sfTerminalWidth(w)
+	}
+	return f
+}
+
+// newStreamFormatterWithWidth creates a stream formatter with an
+// explicit width and pre-computed glamour style. Used when rendering
+// into a buffer (e.g. the TUI log view) where terminal queries
+// aren't possible.
+func newStreamFormatterWithWidth(
+	w io.Writer, width int, style gansi.StyleConfig,
+) *streamFormatter {
+	return &streamFormatter{
+		w: w, isTTY: true, width: width, glamourStyle: style,
+	}
+}
+
+// sfTerminalWidth returns the terminal width for the given writer,
+// defaulting to 100 if detection fails.
+func sfTerminalWidth(w io.Writer) int {
+	if f, ok := w.(interface{ Fd() uintptr }); ok {
+		if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+			return w
+		}
+	}
+	return 100
+}
+
+// sfGlamourStyle returns a glamour style config with zero margins,
+// matching the TUI's rendering. Detects dark/light background once.
+func sfGlamourStyle() gansi.StyleConfig {
+	style := styles.LightStyleConfig
+	if termenv.HasDarkBackground() {
+		style = styles.DarkStyleConfig
+	}
+	zeroMargin := uint(0)
+	style.Document.Margin = &zeroMargin
+	style.CodeBlock.Margin = &zeroMargin
+	style.Code.Prefix = ""
+	style.Code.Suffix = ""
+	return style
 }
 
 func (f *streamFormatter) Write(p []byte) (int, error) {
@@ -145,8 +219,8 @@ func (f *streamFormatter) processLine(line string) {
 		// Gemini format: assistant text
 		if ev.Role == "assistant" {
 			var text string
-			if json.Unmarshal(ev.Content, &text) == nil && strings.TrimSpace(text) != "" {
-				f.writef("%s\n", strings.TrimSpace(text))
+			if json.Unmarshal(ev.Content, &text) == nil {
+				f.writeText(text)
 			}
 		}
 	case "tool_use":
@@ -174,13 +248,19 @@ func (f *streamFormatter) processCodexItem(eventType string, item *codexItem) {
 		return
 	}
 	switch item.Type {
+	case "reasoning":
+		if eventType != "item.completed" {
+			return
+		}
+		text := strings.TrimSpace(sanitizeControl(item.Text))
+		if text != "" {
+			f.writeReasoning(text)
+		}
 	case "agent_message":
 		if eventType != "item.completed" {
 			return
 		}
-		if text := strings.TrimSpace(sanitizeControl(item.Text)); text != "" {
-			f.writef("%s\n", text)
-		}
+		f.writeText(sanitizeControlKeepNewlines(item.Text))
 	case "command_execution":
 		cmd := strings.TrimSpace(sanitizeControl(item.Command))
 		if !f.shouldRenderCodexCommand(eventType, item, cmd) {
@@ -189,12 +269,12 @@ func (f *streamFormatter) processCodexItem(eventType string, item *codexItem) {
 		if len(cmd) > 80 {
 			cmd = cmd[:77] + "..."
 		}
-		f.writef("%-6s %s\n", "Bash", cmd)
+		f.writeTool("Bash", cmd)
 	case "file_change":
 		if eventType != "item.completed" {
 			return
 		}
-		f.writef("%-6s\n", "Edit")
+		f.writeTool("Edit", "")
 	}
 }
 
@@ -345,8 +425,8 @@ func (f *streamFormatter) processAssistantContent(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		// Try as plain string (legacy format)
 		var text string
-		if err := json.Unmarshal(raw, &text); err == nil && text != "" {
-			f.writef("%s\n", text)
+		if err := json.Unmarshal(raw, &text); err == nil {
+			f.writeText(text)
 		}
 		return
 	}
@@ -354,9 +434,7 @@ func (f *streamFormatter) processAssistantContent(raw json.RawMessage) {
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			if text := strings.TrimSpace(b.Text); text != "" {
-				f.writef("%s\n", text)
-			}
+			f.writeText(b.Text)
 		case "tool_use":
 			f.formatToolUse(b.Name, b.Input)
 		}
@@ -364,37 +442,38 @@ func (f *streamFormatter) processAssistantContent(raw json.RawMessage) {
 }
 
 func (f *streamFormatter) formatToolUse(name string, input json.RawMessage) {
+	name = sanitizeControl(name)
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(input, &fields); err != nil {
-		f.writef("%-6s\n", name)
+		f.writeTool(name, "")
 		return
 	}
 
 	switch name {
 	case "Read":
-		f.writef("%-6s %s\n", name, jsonString(fields["file_path"]))
+		f.writeTool(name, jsonString(fields["file_path"]))
 	case "Edit", "MultiEdit":
-		f.writef("%-6s %s\n", name, jsonString(fields["file_path"]))
+		f.writeTool(name, jsonString(fields["file_path"]))
 	case "Write":
-		f.writef("%-6s %s\n", name, jsonString(fields["file_path"]))
+		f.writeTool(name, jsonString(fields["file_path"]))
 	case "Bash":
 		cmd := jsonString(fields["command"])
 		if len(cmd) > 80 {
 			cmd = cmd[:77] + "..."
 		}
-		f.writef("%-6s %s\n", name, cmd)
+		f.writeTool(name, cmd)
 	case "Grep":
 		pattern := jsonString(fields["pattern"])
 		path := jsonString(fields["path"])
 		if path != "" {
-			f.writef("%-6s %s  %s\n", name, pattern, path)
+			f.writeTool(name, pattern+"  "+path)
 		} else {
-			f.writef("%-6s %s\n", name, pattern)
+			f.writeTool(name, pattern)
 		}
 	case "Glob":
-		f.writef("%-6s %s\n", name, jsonString(fields["pattern"]))
+		f.writeTool(name, jsonString(fields["pattern"]))
 	default:
-		f.writef("%-6s\n", name)
+		f.writeTool(name, "")
 	}
 }
 
@@ -406,6 +485,65 @@ func (f *streamFormatter) writef(format string, args ...any) {
 	_, f.writeErr = fmt.Fprintf(f.w, format, args...)
 }
 
+// writeText writes agent text, rendering markdown and wrapping to
+// terminal width when in TTY mode with a known width.
+func (f *streamFormatter) writeText(text string) {
+	text = sanitizeControlKeepNewlines(text)
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if f.lastWasTool && f.hasOutput {
+		f.writef("\n")
+	}
+	f.lastWasTool = false
+	f.hasOutput = true
+	if f.width <= 0 {
+		f.writef("%s\n", text)
+		return
+	}
+	lines := renderMarkdownLines(
+		text, f.width, f.width, f.glamourStyle, 2,
+	)
+	for _, line := range lines {
+		f.writef("%s\n", line)
+	}
+}
+
+// writeReasoning writes a dimmed reasoning summary line.
+func (f *streamFormatter) writeReasoning(text string) {
+	text = sanitizeControlKeepNewlines(text)
+	if f.lastWasTool && f.hasOutput {
+		f.writef("\n")
+	}
+	f.lastWasTool = false
+	f.hasOutput = true
+	f.writef("%s\n", sfReasoningStyle.Render(text))
+}
+
+// writeTool writes a styled tool-call line with a gutter prefix
+// for visual grouping:
+//
+//	│ Read   internal/daemon/worker.go
+//	│ Edit   internal/daemon/worker.go
+func (f *streamFormatter) writeTool(name, arg string) {
+	name = sanitizeControl(name)
+	arg = sanitizeControl(arg)
+	if !f.lastWasTool && f.hasOutput {
+		f.writef("\n")
+	}
+	f.lastWasTool = true
+	f.hasOutput = true
+	gutter := sfGutterStyle.Render(" │")
+	styled := fmt.Sprintf(
+		"%s %s %s",
+		gutter,
+		sfToolStyle.Render(fmt.Sprintf("%-6s", name)),
+		sfArgStyle.Render(arg),
+	)
+	f.writef("%s\n", styled)
+}
+
 // writerIsTerminal checks if a writer is backed by a terminal.
 func writerIsTerminal(w io.Writer) bool {
 	if f, ok := w.(interface{ Fd() uintptr }); ok {
@@ -415,18 +553,34 @@ func writerIsTerminal(w io.Writer) bool {
 }
 
 // sanitizeControl strips ANSI escape sequences and non-printable control
-// characters from s. This prevents terminal injection from untrusted
-// model/subprocess output embedded in codex JSONL fields.
+// characters from s. Newlines are replaced with spaces to produce
+// single-line output (used for command text summaries).
 func sanitizeControl(s string) string {
+	return sanitizeControlChars(s, false)
+}
+
+// sanitizeControlKeepNewlines strips ANSI escape sequences and
+// non-printable control characters but preserves newlines. Used for
+// agent text content that needs to retain paragraph structure.
+func sanitizeControlKeepNewlines(s string) string {
+	return sanitizeControlChars(s, true)
+}
+
+func sanitizeControlChars(s string, keepNewlines bool) string {
 	s = ansiEscapePattern.ReplaceAllString(s, "")
-	// Replace newlines/carriage returns with spaces to avoid collapsing words.
-	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", " ")
+	if keepNewlines {
+		// Normalize line endings but preserve them.
+		s = strings.ReplaceAll(s, "\r\n", "\n")
+		s = strings.ReplaceAll(s, "\r", "\n")
+	} else {
+		s = strings.ReplaceAll(s, "\r\n", " ")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", " ")
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r == '\t' || !unicode.IsControl(r) {
+		if r == '\t' || r == '\n' || !unicode.IsControl(r) {
 			b.WriteRune(r)
 		}
 	}

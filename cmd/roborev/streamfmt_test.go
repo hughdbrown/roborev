@@ -26,7 +26,9 @@ func (fix *streamFormatterFixture) writeLine(s string) {
 }
 
 func (fix *streamFormatterFixture) output() string {
-	return fix.buf.String()
+	// Strip ANSI escape sequences so assertions test logical content
+	// regardless of TTY styling.
+	return ansiEscapePattern.ReplaceAllString(fix.buf.String(), "")
 }
 
 func (fix *streamFormatterFixture) assertContains(t *testing.T, substr string) {
@@ -396,6 +398,21 @@ func TestStreamFormatter_Codex_Scenarios(t *testing.T) {
 			counts:   map[string]int{"Bash   bash -lc ls": 2},
 		},
 		{
+			name: "Codex Reasoning Displayed",
+			events: []string{
+				`{"type":"item.completed","item":{"type":"reasoning","text":"**Reviewing error handling changes**"}}`,
+			},
+			contains: []string{"Reviewing error handling changes"},
+		},
+		{
+			name: "Codex Reasoning Suppressed On Non-Completed",
+			events: []string{
+				`{"type":"item.started","item":{"type":"reasoning","text":"draft thinking"}}`,
+				`{"type":"item.updated","item":{"type":"reasoning","text":"still thinking"}}`,
+			},
+			empty: true,
+		},
+		{
 			name: "Codex Multi ID Same Command Deterministic Pairing",
 			events: []string{
 				`{"type":"item.started","item":{"id":"cmd_A","type":"command_execution","command":"bash -lc ls"}}`,
@@ -437,6 +454,95 @@ func TestStreamFormatter_Codex_Scenarios(t *testing.T) {
 	}
 }
 
+func TestSanitizeControl(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain", "hello world", "hello world"},
+		{"newlines collapsed", "line1\nline2\r\nline3", "line1 line2 line3"},
+		{"ansi stripped", "\x1b[31mred\x1b[0m text", "red text"},
+		{"control chars removed", "bell\x07here", "bellhere"},
+		{"tabs kept", "col1\tcol2", "col1\tcol2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeControl(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeControl(%q) = %q, want %q",
+					tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeControlKeepNewlines(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain", "hello", "hello"},
+		{"newlines preserved", "line1\nline2", "line1\nline2"},
+		{"crlf normalized", "line1\r\nline2\rline3", "line1\nline2\nline3"},
+		{"ansi stripped", "\x1b[32mgreen\x1b[0m", "green"},
+		{"control chars removed", "bell\x07here", "bellhere"},
+		{"tabs kept", "col1\tcol2", "col1\tcol2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeControlKeepNewlines(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeControlKeepNewlines(%q) = %q, want %q",
+					tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamFormatter_TextToToolTransition(t *testing.T) {
+	fix := newFixture(true)
+	fix.writeLine(eventAssistantText("Reviewing code."))
+	fix.writeLine(eventAssistantToolUse("Read", map[string]any{
+		"file_path": "main.go",
+	}))
+	fix.writeLine(eventAssistantToolUse("Edit", map[string]any{
+		"file_path":  "main.go",
+		"old_string": "old", "new_string": "new",
+	}))
+	fix.writeLine(eventAssistantText("Done fixing."))
+
+	out := fix.output()
+	// Text → tool transition should have blank line separation
+	lines := strings.Split(out, "\n")
+	var emptyCount int
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			emptyCount++
+		}
+	}
+	// At least 2 blank lines: text→tool and tool→text transitions
+	if emptyCount < 2 {
+		t.Errorf("expected at least 2 blank lines for transitions, got %d in:\n%s",
+			emptyCount, out)
+	}
+
+	// Tool lines should have gutter prefix
+	for _, l := range lines {
+		if strings.Contains(l, "Read") && strings.Contains(l, "main.go") {
+			if !strings.Contains(l, "|") && !strings.Contains(l, "│") {
+				t.Errorf("tool line should have gutter prefix, got: %q", l)
+			}
+		}
+	}
+
+	// Consecutive tool calls should NOT have blank line between them
+	fix.assertContains(t, "Read   main.go")
+	fix.assertContains(t, "Edit   main.go")
+	fix.assertContains(t, "Done fixing.")
+}
+
 func TestStreamFormatter_PartialWrites(t *testing.T) {
 	fix := newFixture(true)
 
@@ -448,4 +554,92 @@ func TestStreamFormatter_PartialWrites(t *testing.T) {
 	}
 	_, _ = fix.f.Write([]byte(full[20:]))
 	fix.assertContains(t, "hello")
+}
+
+func TestStreamFormatter_SanitizesAssistantText(t *testing.T) {
+	// ANSI/OSC escape sequences in assistant text (which can
+	// originate from model-reflected untrusted repo content)
+	// must be stripped before rendering. Glamour/lipgloss add
+	// their own styling codes — only injected sequences should
+	// be gone.
+	fix := newFixture(true)
+	text := "\x1b[31mred\x1b[0m normal \x1b]0;evil\x07"
+	fix.writeLine(eventAssistantText(text))
+
+	raw := fix.buf.String()
+	// OSC title-change and BEL must never reach the terminal.
+	if strings.Contains(raw, "\x1b]0;") {
+		t.Errorf("OSC title escape leaked: %q", raw)
+	}
+	if strings.Contains(raw, "\x07") {
+		t.Errorf("BEL char leaked: %q", raw)
+	}
+	// Injected SGR color (\x1b[31m) should be stripped;
+	// only glamour/lipgloss styling should remain.
+	if strings.Contains(raw, "\x1b[31m") {
+		t.Errorf("injected SGR escape leaked: %q", raw)
+	}
+	// The actual text content should survive.
+	fix.assertContains(t, "red")
+	fix.assertContains(t, "normal")
+	// "evil" should not appear (it was inside the OSC payload).
+	fix.assertNotContains(t, "evil")
+}
+
+func TestStreamFormatter_SanitizesToolArgs(t *testing.T) {
+	// Control sequences in tool arguments (file paths, commands)
+	// must be stripped before rendering.
+	fix := newFixture(true)
+	fix.writeLine(eventAssistantToolUse("Read", map[string]any{
+		"file_path": "/tmp/\x1b]0;evil\x07\x1b[31mred\x1b[0m.go",
+	}))
+
+	raw := fix.buf.String()
+	if strings.Contains(raw, "\x1b]0;") {
+		t.Errorf("OSC escape leaked in tool arg: %q", raw)
+	}
+	if strings.Contains(raw, "\x07") {
+		t.Errorf("BEL char leaked in tool arg: %q", raw)
+	}
+	if strings.Contains(raw, "\x1b[31m") {
+		t.Errorf("injected SGR escape leaked in tool arg: %q", raw)
+	}
+	fix.assertContains(t, "Read")
+	fix.assertContains(t, ".go")
+}
+
+func TestStreamFormatter_SanitizesToolName(t *testing.T) {
+	fix := newFixture(true)
+	fix.writeLine(eventAssistantToolUse(
+		"Read\x1b[31m", map[string]any{
+			"file_path": "clean.go",
+		},
+	))
+
+	raw := fix.buf.String()
+	if strings.Contains(raw, "\x1b[31m") {
+		t.Errorf("injected SGR in tool name leaked: %q", raw)
+	}
+	fix.assertContains(t, "clean.go")
+}
+
+func TestStreamFormatter_SanitizesGeminiText(t *testing.T) {
+	fix := newFixture(true)
+	ev := toJson(map[string]any{
+		"type":    "message",
+		"role":    "assistant",
+		"content": "\x1b[1mbold\x1b[0m safe \x1b]0;title\x07",
+	})
+	fix.writeLine(ev)
+
+	raw := fix.buf.String()
+	if strings.Contains(raw, "\x1b]0;") {
+		t.Errorf("OSC escape leaked in Gemini text: %q", raw)
+	}
+	if strings.Contains(raw, "\x1b[1m") {
+		t.Errorf("injected bold escape leaked: %q", raw)
+	}
+	fix.assertContains(t, "bold")
+	fix.assertContains(t, "safe")
+	fix.assertNotContains(t, "title")
 }
