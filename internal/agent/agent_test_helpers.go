@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // expectedAgents is the single source of truth for registered agent names.
@@ -71,6 +73,21 @@ func writeTempCommand(t *testing.T, script string) string {
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("write temp command close: %v", err)
+	}
+	// On Linux (especially under -race), exec can race against the
+	// kernel releasing the inode write reference and hit ETXTBSY.
+	// Verify the script is execable by attempting a no-op exec.
+	// Retry with exponential backoff if we hit the race.
+	const maxRetries = 10
+	for i := range maxRetries {
+		_, err = exec.Command(path, "--help-probe-etxtbsy").CombinedOutput()
+		if err == nil || !strings.Contains(err.Error(), "text file busy") {
+			break
+		}
+		if i == maxRetries-1 {
+			t.Fatalf("write temp command: ETXTBSY persisted after %d retries", maxRetries)
+		}
+		time.Sleep(time.Duration(1<<i) * time.Millisecond)
 	}
 	return path
 }
