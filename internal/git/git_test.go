@@ -1327,3 +1327,148 @@ func TestShortSHA(t *testing.T) {
 		})
 	}
 }
+
+func TestWorktreePathForBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// evalSymlinks resolves symlinks (e.g. /var -> /private/var on macOS)
+	// so that paths from git output match paths from t.TempDir().
+	evalSymlinks := func(t *testing.T, path string) string {
+		t.Helper()
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", path, err)
+		}
+		return resolved
+	}
+
+	t.Run("returns worktree dir for branch checked out in worktree", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("f.txt", "init", "init")
+		wt := repo.AddWorktree("feature-x")
+
+		got, checkedOut, err := WorktreePathForBranch(repo.Dir, "feature-x")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got = evalSymlinks(t, got)
+		want := evalSymlinks(t, wt.Dir)
+		if got != want {
+			t.Errorf("WorktreePathForBranch() path = %q, want %q", got, want)
+		}
+		if !checkedOut {
+			t.Error("WorktreePathForBranch() checkedOut = false, want true")
+		}
+	})
+
+	t.Run("returns repoPath and false when branch has no worktree", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("f.txt", "init", "init")
+		repo.Run("branch", "other-branch")
+
+		got, checkedOut, err := WorktreePathForBranch(repo.Dir, "other-branch")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != repo.Dir {
+			t.Errorf("WorktreePathForBranch() path = %q, want %q", got, repo.Dir)
+		}
+		if checkedOut {
+			t.Error("WorktreePathForBranch() checkedOut = true, want false")
+		}
+	})
+
+	t.Run("returns repoPath and true for empty branch", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("f.txt", "init", "init")
+
+		got, checkedOut, err := WorktreePathForBranch(repo.Dir, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != repo.Dir {
+			t.Errorf("WorktreePathForBranch() path = %q, want %q", got, repo.Dir)
+		}
+		if !checkedOut {
+			t.Error("WorktreePathForBranch() checkedOut = false, want true")
+		}
+	})
+
+	t.Run("returns main repo dir for branch checked out in main worktree", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("f.txt", "init", "init")
+		branch := GetCurrentBranch(repo.Dir)
+
+		got, checkedOut, err := WorktreePathForBranch(repo.Dir, branch)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got = evalSymlinks(t, got)
+		want := evalSymlinks(t, repo.Dir)
+		if got != want {
+			t.Errorf("WorktreePathForBranch() path = %q, want %q", got, want)
+		}
+		if !checkedOut {
+			t.Error("WorktreePathForBranch() checkedOut = false, want true")
+		}
+	})
+
+	t.Run("returns error for invalid repo path", func(t *testing.T) {
+		_, _, err := WorktreePathForBranch("/nonexistent/repo", "main")
+		if err == nil {
+			t.Error("expected error for invalid repo path, got nil")
+		}
+	})
+
+	t.Run("git worktree add succeeds on pre-existing empty directory", func(t *testing.T) {
+		// Confirms that git worktree add works fine when the target directory
+		// already exists (empty). os.MkdirTemp creates the dir before git
+		// worktree add, which is the same pattern used in applyFixPatchInWorktree.
+		repo := NewTestRepo(t)
+		repo.CommitFile("f.txt", "init", "init")
+		repo.Run("branch", "wt-preexist")
+
+		wtDir := t.TempDir() // creates the directory — it already exists
+		cmd := exec.Command("git", "-C", repo.Dir, "worktree", "add", wtDir, "wt-preexist")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git worktree add into pre-existing empty dir failed: %v\n%s", err, out)
+		}
+		t.Cleanup(func() {
+			rmCmd := exec.Command("git", "-C", repo.Dir, "worktree", "remove", wtDir)
+			_ = rmCmd.Run()
+		})
+
+		// Verify the worktree is functional
+		if _, statErr := os.Stat(filepath.Join(wtDir, "f.txt")); statErr != nil {
+			t.Errorf("expected f.txt in worktree, got: %v", statErr)
+		}
+	})
+
+	t.Run("skips stale worktree whose directory was deleted", func(t *testing.T) {
+		// When a worktree directory is manually deleted (but not pruned),
+		// git worktree list still shows it with a "prunable" annotation.
+		// WorktreePathForBranch should not return a non-existent path as valid.
+		repo := NewTestRepo(t)
+		repo.CommitFile("f.txt", "init", "init")
+		wt := repo.AddWorktree("stale-branch")
+		wtDir := wt.Dir
+
+		// Forcefully remove the worktree directory without git prune.
+		os.RemoveAll(wtDir)
+
+		got, checkedOut, err := WorktreePathForBranch(repo.Dir, "stale-branch")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// The stale worktree path should not be returned as checked out.
+		// If checkedOut is true but the directory doesn't exist, that's a bug.
+		if checkedOut {
+			if _, statErr := os.Stat(got); statErr != nil {
+				t.Errorf("WorktreePathForBranch() returned checkedOut=true for stale path %q that doesn't exist", got)
+			}
+		}
+	})
+}

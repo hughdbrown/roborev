@@ -110,8 +110,9 @@ const (
 	tuiViewCommitMsg
 	tuiViewHelp
 	tuiViewLog
-	tuiViewTasks // Background fix tasks view
-	tuiViewPatch // Patch viewer for fix jobs
+	tuiViewTasks           // Background fix tasks view
+	tuiViewWorktreeConfirm // Confirm creating a worktree to apply patch
+	tuiViewPatch           // Patch viewer for fix jobs
 )
 
 // queuePrefetchBuffer is the number of extra rows to fetch beyond what's visible,
@@ -278,6 +279,9 @@ type tuiModel struct {
 	reviewFixPanelOpen    bool // true when fix panel is visible in review view
 	reviewFixPanelFocused bool // true when keyboard focus is on the fix panel
 	reviewFixPanelPending bool // true when 'F' from queue; panel opens on review load
+
+	worktreeConfirmJobID  int64  // Job ID pending worktree-apply confirmation
+	worktreeConfirmBranch string // Branch name for worktree confirmation prompt
 }
 
 // pendingState tracks a pending addressed toggle with sequence number
@@ -412,7 +416,10 @@ type tuiApplyPatchResultMsg struct {
 	success      bool
 	commitFailed bool // True only when patch applied but git commit failed (working tree is dirty)
 	err          error
-	rebase       bool // True if patch didn't apply and needs rebase
+	rebase       bool   // True if patch didn't apply and needs rebase
+	needWorktree bool   // True if branch is not checked out and needs a worktree
+	branch       string // Branch name (for worktree creation prompt)
+	worktreeDir  string // Non-empty if a temp worktree was kept for recovery
 }
 
 type tuiPatchMsg struct {
@@ -2380,6 +2387,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tuiApplyPatchResultMsg:
+		if msg.needWorktree {
+			m.worktreeConfirmJobID = msg.jobID
+			m.worktreeConfirmBranch = msg.branch
+			m.currentView = tuiViewWorktreeConfirm
+			return m, nil
+		}
 		if msg.rebase {
 			m.flashMessage = fmt.Sprintf("Patch for job #%d doesn't apply cleanly - triggering rebase", msg.jobID)
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
@@ -2387,8 +2400,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
 		} else if msg.commitFailed {
 			// Patch applied to working tree but commit failed — working tree is dirty
-			m.flashMessage = fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
-			m.flashExpiresAt = time.Now().Add(5 * time.Second)
+			detail := fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
+			if msg.worktreeDir != "" {
+				detail += fmt.Sprintf(" (worktree kept at %s)", msg.worktreeDir)
+			}
+			m.flashMessage = detail
+			m.flashExpiresAt = time.Now().Add(8 * time.Second)
 			m.flashView = tuiViewTasks
 		} else if msg.err != nil {
 			m.flashMessage = fmt.Sprintf("Apply failed: %v", msg.err)
@@ -2429,7 +2446,9 @@ func (m tuiModel) View() string {
 	if m.currentView == tuiViewTasks {
 		return m.renderTasksView()
 	}
-
+	if m.currentView == tuiViewWorktreeConfirm {
+		return m.renderWorktreeConfirmView()
+	}
 	if m.currentView == tuiViewPatch {
 		return m.renderPatchView()
 	}
@@ -3986,6 +4005,24 @@ func (m tuiModel) renderPatchView() string {
 	return b.String()
 }
 
+// renderWorktreeConfirmView renders the worktree creation confirmation modal.
+func (m tuiModel) renderWorktreeConfirmView() string {
+	var b strings.Builder
+
+	b.WriteString(tuiTitleStyle.Render("Create Worktree"))
+	b.WriteString("\x1b[K\n\n")
+
+	fmt.Fprintf(&b, "  Branch %q is not checked out anywhere.\n", m.worktreeConfirmBranch)
+	b.WriteString("  Create a temporary worktree to apply and commit the patch?\n\n")
+	b.WriteString("  The worktree will be removed after the commit.\n")
+	b.WriteString("  The commit will persist on the branch.\n\n")
+
+	b.WriteString(tuiHelpStyle.Render("y/enter: create worktree and apply | esc/n: cancel"))
+	b.WriteString("\x1b[K\x1b[J")
+
+	return b.String()
+}
+
 // fetchJobByID fetches a single job by ID from the daemon API.
 func (m tuiModel) fetchJobByID(jobID int64) (*storage.ReviewJob, error) {
 	var result struct {
@@ -4048,88 +4085,161 @@ func (m tuiModel) triggerFix(parentJobID int64, prompt, gitRef string) tea.Cmd {
 }
 
 // applyFixPatch fetches and applies the patch for a completed fix job.
+// It resolves the target directory from the branch's worktree, or signals
+// needWorktree if the branch is not checked out anywhere.
 func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 	return func() tea.Msg {
-		// Fetch the patch
-		url := m.serverAddr + fmt.Sprintf("/api/job/patch?job_id=%d", jobID)
-		resp, err := m.client.Get(url)
-		if err != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: err}
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("no patch available")}
+		patch, jobDetail, msg := m.fetchPatchAndJob(jobID)
+		if msg != nil {
+			return *msg
 		}
 
-		patchData, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: err}
+		// Resolve the target directory: if the branch has its own worktree,
+		// apply the patch there instead of the main repo path.
+		targetDir, checkedOut, wtErr := git.WorktreePathForBranch(jobDetail.RepoPath, jobDetail.Branch)
+		if wtErr != nil {
+			return tuiApplyPatchResultMsg{jobID: jobID, err: wtErr}
 		}
-		patch := string(patchData)
-		if patch == "" {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("empty patch")}
-		}
-
-		// Fetch the job to find repo path
-		jobDetail, jErr := m.fetchJobByID(jobID)
-		if jErr != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: jErr}
-		}
-
-		// Check for uncommitted changes in files the patch touches
-		patchedFiles, pfErr := patchFiles(patch)
-		if pfErr != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: pfErr}
-		}
-		dirty, dirtyErr := dirtyPatchFiles(jobDetail.RepoPath, patchedFiles)
-		if dirtyErr != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID,
-				err: fmt.Errorf("checking dirty files: %w", dirtyErr)}
-		}
-		if len(dirty) > 0 {
-			return tuiApplyPatchResultMsg{jobID: jobID,
-				err: fmt.Errorf("uncommitted changes in patch files: %s — stash or commit first", strings.Join(dirty, ", "))}
-		}
-
-		// Dry-run check — only trigger rebase on actual merge conflicts
-		if err := worktree.CheckPatch(jobDetail.RepoPath, patch); err != nil {
-			var conflictErr *worktree.PatchConflictError
-			if errors.As(err, &conflictErr) {
-				return tuiApplyPatchResultMsg{jobID: jobID, rebase: true, err: err}
+		if !checkedOut {
+			return tuiApplyPatchResultMsg{
+				jobID:        jobID,
+				needWorktree: true,
+				branch:       jobDetail.Branch,
 			}
-			return tuiApplyPatchResultMsg{jobID: jobID, err: err}
 		}
 
-		// Apply the patch
-		if err := worktree.ApplyPatch(jobDetail.RepoPath, patch); err != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, err: err}
-		}
-
-		var parentJobID int64
-		if jobDetail.ParentJobID != nil {
-			parentJobID = *jobDetail.ParentJobID
-		}
-
-		// Stage and commit
-		commitMsg := fmt.Sprintf("fix: apply roborev fix job #%d", jobID)
-		if parentJobID > 0 {
-			ref := git.ShortSHA(jobDetail.GitRef)
-			commitMsg = fmt.Sprintf("fix: apply roborev fix for %s (job #%d)", ref, jobID)
-		}
-		if err := commitPatch(jobDetail.RepoPath, patch, commitMsg); err != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
-				commitFailed: true, err: fmt.Errorf("patch applied but commit failed: %w", err)}
-		}
-
-		// Mark the fix job as applied on the server
-		if err := m.postJSON("/api/job/applied", map[string]any{"job_id": jobID}, nil); err != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
-				err: fmt.Errorf("patch applied and committed but failed to mark applied: %w", err)}
-		}
-
-		return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true}
+		return m.checkApplyCommitPatch(jobID, jobDetail, targetDir, patch)
 	}
+}
+
+// applyFixPatchInWorktree creates a temporary worktree for the branch, applies the
+// patch there, commits, and removes the worktree. The commit persists on the branch.
+func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
+	return func() tea.Msg {
+		patch, jobDetail, msg := m.fetchPatchAndJob(jobID)
+		if msg != nil {
+			return *msg
+		}
+
+		// Create a temporary worktree on the branch.
+		wtDir, err := os.MkdirTemp("", "roborev-apply-")
+		if err != nil {
+			return tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("create temp dir: %w", err)}
+		}
+
+		removeWorktree := func() {
+			if err := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "remove", "--force", wtDir).Run(); err != nil {
+				os.RemoveAll(wtDir)
+				_ = exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "prune").Run()
+			}
+		}
+
+		cmd := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "add", wtDir, jobDetail.Branch)
+		if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+			os.RemoveAll(wtDir)
+			return tuiApplyPatchResultMsg{jobID: jobID,
+				err: fmt.Errorf("git worktree add: %w: %s", cmdErr, out)}
+		}
+
+		result := m.checkApplyCommitPatch(jobID, jobDetail, wtDir, patch)
+
+		// Keep the worktree if patch was applied but commit failed, so the user can recover.
+		if result.commitFailed {
+			result.worktreeDir = wtDir
+		} else {
+			removeWorktree()
+		}
+
+		return result
+	}
+}
+
+// fetchPatchAndJob fetches the patch content and job details for a fix job.
+// Returns nil msg on success; a non-nil msg should be returned to the TUI immediately.
+func (m tuiModel) fetchPatchAndJob(jobID int64) (string, *storage.ReviewJob, *tuiApplyPatchResultMsg) {
+	url := m.serverAddr + fmt.Sprintf("/api/job/patch?job_id=%d", jobID)
+	resp, err := m.client.Get(url)
+	if err != nil {
+		return "", nil, &tuiApplyPatchResultMsg{jobID: jobID, err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, &tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("no patch available")}
+	}
+
+	patchData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, &tuiApplyPatchResultMsg{jobID: jobID, err: err}
+	}
+	patch := string(patchData)
+	if patch == "" {
+		return "", nil, &tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("empty patch")}
+	}
+
+	jobDetail, jErr := m.fetchJobByID(jobID)
+	if jErr != nil {
+		return "", nil, &tuiApplyPatchResultMsg{jobID: jobID, err: jErr}
+	}
+
+	return patch, jobDetail, nil
+}
+
+// checkApplyCommitPatch validates, applies, commits, and marks a patch as applied.
+// Shared by both applyFixPatch (existing worktree) and applyFixPatchInWorktree (temp worktree).
+func (m tuiModel) checkApplyCommitPatch(jobID int64, jobDetail *storage.ReviewJob, targetDir, patch string) tuiApplyPatchResultMsg {
+	// Check for uncommitted changes in files the patch touches
+	patchedFiles, pfErr := patchFiles(patch)
+	if pfErr != nil {
+		return tuiApplyPatchResultMsg{jobID: jobID, err: pfErr}
+	}
+	dirty, dirtyErr := dirtyPatchFiles(targetDir, patchedFiles)
+	if dirtyErr != nil {
+		return tuiApplyPatchResultMsg{jobID: jobID,
+			err: fmt.Errorf("checking dirty files: %w", dirtyErr)}
+	}
+	if len(dirty) > 0 {
+		return tuiApplyPatchResultMsg{jobID: jobID,
+			err: fmt.Errorf("uncommitted changes in patch files: %s — stash or commit first", strings.Join(dirty, ", "))}
+	}
+
+	// Dry-run check — only trigger rebase on actual merge conflicts
+	if err := worktree.CheckPatch(targetDir, patch); err != nil {
+		var conflictErr *worktree.PatchConflictError
+		if errors.As(err, &conflictErr) {
+			return tuiApplyPatchResultMsg{jobID: jobID, rebase: true, err: err}
+		}
+		return tuiApplyPatchResultMsg{jobID: jobID, err: err}
+	}
+
+	// Apply the patch
+	if err := worktree.ApplyPatch(targetDir, patch); err != nil {
+		return tuiApplyPatchResultMsg{jobID: jobID, err: err}
+	}
+
+	var parentJobID int64
+	if jobDetail.ParentJobID != nil {
+		parentJobID = *jobDetail.ParentJobID
+	}
+
+	// Stage and commit
+	commitMsg := fmt.Sprintf("fix: apply roborev fix job #%d", jobID)
+	if parentJobID > 0 {
+		ref := git.ShortSHA(jobDetail.GitRef)
+		commitMsg = fmt.Sprintf("fix: apply roborev fix for %s (job #%d)", ref, jobID)
+	}
+	if err := commitPatch(targetDir, patch, commitMsg); err != nil {
+		return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
+			commitFailed: true, err: fmt.Errorf("patch applied but commit failed: %w", err)}
+	}
+
+	// Mark the fix job as applied on the server
+	if err := m.postJSON("/api/job/applied", map[string]any{"job_id": jobID}, nil); err != nil {
+		return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
+			err: fmt.Errorf("patch applied and committed but failed to mark applied: %w", err)}
+	}
+
+	return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true}
 }
 
 // commitPatch stages only the files touched by patch and commits them.

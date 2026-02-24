@@ -663,6 +663,70 @@ func GetBranchName(repoPath, sha string) string {
 	return name
 }
 
+// WorktreePathForBranch returns the worktree directory where branch is checked out.
+// If the branch is checked out in any worktree (including the main repo), returns
+// that path and true. If the branch is not checked out anywhere, returns repoPath
+// and false. Returns a non-nil error if the git command fails.
+// An empty branch always returns repoPath, true, nil.
+func WorktreePathForBranch(repoPath, branch string) (string, bool, error) {
+	if branch == "" {
+		return repoPath, true, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "list", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false, fmt.Errorf("git worktree list: %w", err)
+	}
+
+	// Parse porcelain output. Each worktree block is separated by blank lines.
+	// Format:
+	//   worktree /path/to/dir
+	//   HEAD <sha>
+	//   branch refs/heads/<name>
+	//   [prunable ...]
+	//   <blank line>
+	//
+	// We collect path+branch pairs, then verify the path exists before
+	// returning it. This avoids returning stale/prunable worktree paths.
+	type wtEntry struct {
+		path, branch string
+	}
+	var entries []wtEntry
+	var currentPath, currentBranch string
+	for line := range strings.SplitSeq(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			currentPath = path
+			currentBranch = ""
+		} else if ref, ok := strings.CutPrefix(line, "branch "); ok {
+			currentBranch = strings.TrimPrefix(ref, "refs/heads/")
+		} else if line == "" && currentPath != "" {
+			if currentBranch != "" {
+				entries = append(entries, wtEntry{currentPath, currentBranch})
+			}
+			currentPath = ""
+			currentBranch = ""
+		}
+	}
+	// Handle last block if output doesn't end with a blank line.
+	if currentPath != "" && currentBranch != "" {
+		entries = append(entries, wtEntry{currentPath, currentBranch})
+	}
+
+	for _, e := range entries {
+		if e.branch == branch {
+			if _, err := os.Stat(e.path); err == nil {
+				return e.path, true, nil
+			}
+			// Path doesn't exist (stale/prunable worktree) — skip it.
+		}
+	}
+	return repoPath, false, nil
+}
+
 // GetHooksPath returns the path to the hooks directory, respecting core.hooksPath
 func GetHooksPath(repoPath string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--git-path", "hooks")
