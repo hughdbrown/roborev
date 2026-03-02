@@ -94,6 +94,12 @@ func (wp *WorkerPool) Stop() {
 	wp.stopOnce.Do(func() {
 		log.Println("Stopping worker pool...")
 		close(wp.stopCh)
+
+		// Cancel all in-flight jobs so agent subprocesses (e.g. ACP)
+		// are terminated promptly instead of running until their
+		// individual timeouts expire.
+		wp.cancelAllRunningJobs()
+
 		// Wait for Start to finish wg.Add before calling Wait.
 		// If Start was never called, readyCh stays open but
 		// stopCh is closed, so any late workers exit immediately.
@@ -104,6 +110,17 @@ func (wp *WorkerPool) Stop() {
 		}
 		log.Println("Worker pool stopped")
 	})
+}
+
+// cancelAllRunningJobs cancels every in-flight job context, causing
+// agent subprocesses to be killed promptly during shutdown.
+func (wp *WorkerPool) cancelAllRunningJobs() {
+	wp.runningJobsMu.Lock()
+	defer wp.runningJobsMu.Unlock()
+	for jobID, cancel := range wp.runningJobs {
+		log.Printf("Canceling in-flight job %d for shutdown", jobID)
+		cancel()
+	}
 }
 
 // ActiveWorkers returns the number of currently active workers

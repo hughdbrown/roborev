@@ -347,3 +347,58 @@ func TestServerStop_StopsCIPoller(t *testing.T) {
 		t.Fatalf("expected poller stopped after Server.Stop, got (%v, %q)", healthy, msg)
 	}
 }
+
+func TestBuildFixPromptWithInstructions(t *testing.T) {
+	reviewOutput := "FAIL: found 2 issues\n- SQL injection in handler.go:42\n- Missing auth check in api.go:10"
+
+	t.Run("without instructions", func(t *testing.T) {
+		prompt := buildFixPromptWithInstructions(reviewOutput, "")
+
+		if !strings.Contains(prompt, "SQL injection in handler.go:42") {
+			t.Error("prompt should contain review findings")
+		}
+		if !strings.Contains(prompt, "Missing auth check") {
+			t.Error("prompt should contain all findings")
+		}
+		if strings.Contains(prompt, "Additional Instructions") {
+			t.Error("prompt should not have Additional Instructions section when none provided")
+		}
+		if !strings.Contains(prompt, "apply the suggested changes") {
+			t.Error("prompt should contain fix instructions")
+		}
+	})
+
+	t.Run("with custom instructions includes both review and instructions", func(t *testing.T) {
+		customInstructions := "Ignore the SQL injection finding, focus on the auth check only."
+		prompt := buildFixPromptWithInstructions(reviewOutput, customInstructions)
+
+		// Must contain original review context
+		if !strings.Contains(prompt, "SQL injection in handler.go:42") {
+			t.Error("prompt should contain original review findings")
+		}
+		if !strings.Contains(prompt, "Missing auth check") {
+			t.Error("prompt should contain all original findings")
+		}
+
+		// Must contain custom instructions in a dedicated section
+		if !strings.Contains(prompt, "## Additional Instructions") {
+			t.Error("prompt should have Additional Instructions section")
+		}
+		if !strings.Contains(prompt, customInstructions) {
+			t.Error("prompt should contain the custom instructions text")
+		}
+
+		// Must still have standard fix instructions
+		if !strings.Contains(prompt, "apply the suggested changes") {
+			t.Error("prompt should contain standard fix instructions")
+		}
+	})
+
+	t.Run("buildFixPrompt delegates to buildFixPromptWithInstructions", func(t *testing.T) {
+		prompt := buildFixPrompt(reviewOutput)
+		expected := buildFixPromptWithInstructions(reviewOutput, "")
+		if prompt != expected {
+			t.Error("buildFixPrompt should produce same output as buildFixPromptWithInstructions with empty instructions")
+		}
+	})
+}

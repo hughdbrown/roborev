@@ -181,7 +181,15 @@ func (a *ACPAgent) WithModel(model string) Agent {
 }
 
 // Review implements the main review functionality using ACP SDK
-func (a *ACPAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
+func (a *ACPAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (result string, retErr error) {
+	// Recover from panics in the ACP SDK or stream parsing to prevent
+	// the entire worker from crashing on malformed agent output.
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("ACP agent panicked: %v", r)
+		}
+	}()
+
 	// Set timeout context
 	var cancel context.CancelFunc
 	var err error
@@ -338,6 +346,15 @@ func (a *ACPAgent) Review(ctx context.Context, repoPath, commitSHA, prompt strin
 
 	promptResponse, err := conn.Prompt(ctx, promptRequest)
 	if err != nil {
+		// Provide richer context when the agent process crashed or
+		// wrote malformed/incomplete data to its stdout.
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			return "", fmt.Errorf("ACP agent exited unexpectedly (code %d) during prompt: %w",
+				cmd.ProcessState.ExitCode(), err)
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("ACP agent prompt timed out or was canceled: %w", err)
+		}
 		return "", fmt.Errorf("failed to send prompt: %w", err)
 	}
 
