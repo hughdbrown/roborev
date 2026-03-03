@@ -17,7 +17,8 @@ import (
 var (
 	allowedAgents = []string{
 		"codex", "claude-code", "gemini",
-		"copilot", "opencode", "cursor", "droid",
+		"copilot", "opencode", "cursor",
+		"kiro", "kilo", "droid",
 	}
 	safeVersionRE = regexp.MustCompile(
 		`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$`)
@@ -91,6 +92,12 @@ func AgentEnvVar(agentName string) string {
 		return "GOOGLE_API_KEY"
 	case "copilot":
 		return "GITHUB_TOKEN"
+	case "kiro":
+		// kiro-cli is not CI-compatible yet; use GITHUB_TOKEN
+		// so envEntries skips it (same as copilot).
+		return "GITHUB_TOKEN"
+	case "kilo":
+		return "ANTHROPIC_API_KEY"
 	default:
 		return "OPENAI_API_KEY"
 	}
@@ -113,6 +120,10 @@ func AgentInstallCmd(agentName string) string {
 	case "cursor":
 		return "echo 'Cursor agent is not available in CI" +
 			" environments; choose a different agent'"
+	case "kiro":
+		return "echo 'Install kiro-cli: see https://kiro.dev/'"
+	case "kilo":
+		return "npm install -g @kilocode/cli@latest"
 	case "droid":
 		return "pip install droid-cli || echo 'Note: droid" +
 			" agent may require additional setup; see" +
@@ -255,8 +266,8 @@ var workflowTemplate = `# roborev CI Review
 #
 # Required setup:
 {{- range .EnvEntries }}
-{{- if eq .Name "opencode" }}
-#   - Add a repository secret named "{{ .SecretName }}" (default for opencode).
+{{- if or (eq .Name "opencode") (eq .Name "kilo") }}
+#   - Add a repository secret named "{{ .SecretName }}" (default for {{ .Name }}).
 #     If you use a different model provider, replace with the appropriate key
 #     (e.g., OPENAI_API_KEY, GOOGLE_API_KEY) and update the env block below.
 {{- else }}

@@ -35,6 +35,14 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "valid kiro agent",
+			cfg:  WorkflowConfig{Agents: []string{"kiro"}},
+		},
+		{
+			name: "valid kilo agent",
+			cfg:  WorkflowConfig{Agents: []string{"kilo"}},
+		},
+		{
 			name:    "invalid agent",
 			cfg:     WorkflowConfig{Agents: []string{"evil; rm -rf /"}},
 			wantErr: "invalid agent",
@@ -216,6 +224,37 @@ func TestGenerate(t *testing.T) {
 			},
 		},
 		{
+			name: "kilo gets multi-provider comment",
+			cfg: WorkflowConfig{
+				Agents: []string{"kilo"},
+			},
+			wantStrs: []string{
+				"@kilocode/cli@latest",
+				"ANTHROPIC_API_KEY",
+				"different model provider",
+				"default for kilo",
+			},
+			envChecks: func(t *testing.T, env map[string]string) {
+				if _, ok := env["ANTHROPIC_API_KEY"]; !ok {
+					t.Error("expected ANTHROPIC_API_KEY in env")
+				}
+			},
+		},
+		{
+			name: "kiro skipped from env entries",
+			cfg: WorkflowConfig{
+				Agents: []string{"kiro"},
+			},
+			wantStrs: []string{
+				"kiro.dev",
+			},
+			notWantStrs: []string{
+				"OPENAI_API_KEY",
+				"ANTHROPIC_API_KEY",
+				"AWS_ACCESS_KEY_ID",
+			},
+		},
+		{
 			name: "dedupes env vars",
 			cfg: WorkflowConfig{
 				Agents: []string{"claude-code", "opencode"},
@@ -322,6 +361,14 @@ func TestAgentInstallCmd(t *testing.T) {
 		{
 			agent:   "cursor",
 			wantPkg: "not available in CI",
+		},
+		{
+			agent:   "kiro",
+			wantPkg: "kiro.dev",
+		},
+		{
+			agent:   "kilo",
+			wantPkg: "@kilocode/cli@latest",
 		},
 		{
 			agent:   "droid",
@@ -470,6 +517,8 @@ func TestAgentEnvVar(t *testing.T) {
 		{"gemini", "GOOGLE_API_KEY"},
 		{"copilot", "GITHUB_TOKEN"},
 		{"opencode", "ANTHROPIC_API_KEY"},
+		{"kiro", "GITHUB_TOKEN"},
+		{"kilo", "ANTHROPIC_API_KEY"},
 		{"droid", "OPENAI_API_KEY"},
 	}
 	for _, tt := range tests {
