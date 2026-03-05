@@ -628,7 +628,7 @@ func TestTUIJobCellsContent(t *testing.T) {
 		)
 		cells := m.jobCells(job)
 
-		// cells order: ref, branch, repo, agent, queued, elapsed, status, closed
+		// cells order: ref, branch, repo, agent, queued, elapsed, status, pf, closed
 		if !strings.Contains(cells[0], "abc1234") {
 			t.Errorf("Expected ref to contain abc1234, got %q", cells[0])
 		}
@@ -640,6 +640,9 @@ func TestTUIJobCellsContent(t *testing.T) {
 		}
 		if cells[6] != "Done" {
 			t.Errorf("Expected status 'Done', got %q", cells[6])
+		}
+		if cells[7] != "-" {
+			t.Errorf("Expected verdict '-', got %q", cells[7])
 		}
 	})
 
@@ -659,11 +662,14 @@ func TestTUIJobCellsContent(t *testing.T) {
 		job.Closed = &handled
 
 		cells := m.jobCells(job)
-		if cells[6] != "Pass" {
-			t.Errorf("Expected status 'Pass', got %q", cells[6])
+		if cells[6] != "Done" {
+			t.Errorf("Expected status 'Done', got %q", cells[6])
 		}
-		if cells[7] != "yes" {
-			t.Errorf("Expected closed 'yes', got %q", cells[7])
+		if cells[7] != "P" {
+			t.Errorf("Expected verdict 'P', got %q", cells[7])
+		}
+		if cells[8] != "yes" {
+			t.Errorf("Expected closed 'yes', got %q", cells[8])
 		}
 	})
 }
@@ -728,6 +734,71 @@ func TestTUIQueueTableRendersWithinWidth(t *testing.T) {
 				if visW > w+5 { // small tolerance
 					t.Errorf("line %d exceeds width %d: visW=%d %q", i, w, visW, stripTestANSI(line))
 				}
+			}
+		})
+	}
+}
+
+func TestStatusColumnAutoWidth(t *testing.T) {
+	// The Status column should auto-size to the widest status label
+	// present in the visible jobs, with a floor of 6 (the "Status"
+	// header width). This saves horizontal space when no wide status
+	// labels (e.g. "Canceled") are present.
+	tests := []struct {
+		name      string
+		statuses  []storage.JobStatus
+		wantWidth int // expected content width (header included)
+	}{
+		{"done only", []storage.JobStatus{storage.JobStatusDone}, 6},                                          // "Done"=4, header=6
+		{"queued only", []storage.JobStatus{storage.JobStatusQueued}, 6},                                      // "Queued"=6, header=6
+		{"running", []storage.JobStatus{storage.JobStatusRunning}, 7},                                         // "Running"=7
+		{"canceled", []storage.JobStatus{storage.JobStatusCanceled}, 8},                                       // "Canceled"=8
+		{"mixed done and error", []storage.JobStatus{storage.JobStatusDone, storage.JobStatusFailed}, 6},      // max("Done"=4,"Error"=5,header=6)=6
+		{"mixed done and canceled", []storage.JobStatus{storage.JobStatusDone, storage.JobStatusCanceled}, 8}, // max("Done"=4,"Canceled"=8)=8
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newModel("http://localhost", withExternalIODisabled())
+			m.width = 200
+			m.height = 30
+
+			jobs := make([]storage.ReviewJob, len(tt.statuses))
+			for i, s := range tt.statuses {
+				jobs[i] = makeJob(int64(i+1), withStatus(s), withRef("abc1234"), withRepoName("repo"), withAgent("test"))
+			}
+			m.jobs = jobs
+			m.selectedIdx = 0
+			m.selectedJobID = 1
+
+			output := m.renderQueueView()
+			lines := strings.Split(output, "\n")
+
+			// Find the header line (contains "Status" and "P/F")
+			var headerLine string
+			for _, line := range lines {
+				stripped := stripTestANSI(line)
+				if strings.Contains(stripped, "Status") && strings.Contains(stripped, "P/F") {
+					headerLine = stripped
+					break
+				}
+			}
+			if headerLine == "" {
+				t.Fatal("could not find header line with Status and P/F")
+			}
+
+			statusIdx := strings.Index(headerLine, "Status")
+			pfIdx := strings.Index(headerLine, "P/F")
+			if statusIdx < 0 || pfIdx < 0 || pfIdx <= statusIdx {
+				t.Fatalf("unexpected header layout: %q", headerLine)
+			}
+
+			// The gap between "Status" start and "P/F" start is
+			// the column width + inter-column spacing (1 char padding).
+			gap := pfIdx - statusIdx
+			gotWidth := gap - 1 // subtract 1 for inter-column spacing
+			if gotWidth != tt.wantWidth {
+				t.Errorf("Status column width = %d, want %d (header: %q)", gotWidth, tt.wantWidth, headerLine)
 			}
 		})
 	}
@@ -2198,9 +2269,7 @@ func TestTaskColWidthCacheReuse(t *testing.T) {
 	}
 }
 
-func TestCombinedStatus(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-
+func TestStatusLabel(t *testing.T) {
 	tests := []struct {
 		name string
 		job  storage.ReviewJob
@@ -2210,60 +2279,73 @@ func TestCombinedStatus(t *testing.T) {
 		{"running", storage.ReviewJob{Status: storage.JobStatusRunning}, "Running"},
 		{"failed", storage.ReviewJob{Status: storage.JobStatusFailed}, "Error"},
 		{"canceled", storage.ReviewJob{Status: storage.JobStatusCanceled}, "Canceled"},
-		{"done pass", storage.ReviewJob{Status: storage.JobStatusDone, Verdict: strPtr("P")}, "Pass"},
-		{"done fail", storage.ReviewJob{Status: storage.JobStatusDone, Verdict: strPtr("F")}, "Fail"},
-		{"done unexpected verdict", storage.ReviewJob{Status: storage.JobStatusDone, Verdict: strPtr("X")}, "Fail"},
-		{"done nil verdict", storage.ReviewJob{Status: storage.JobStatusDone}, "Done"},
-		{"applied pass", storage.ReviewJob{Status: storage.JobStatusApplied, Verdict: strPtr("P")}, "Pass"},
-		{"rebased fail", storage.ReviewJob{Status: storage.JobStatusRebased, Verdict: strPtr("F")}, "Fail"},
+		{"done", storage.ReviewJob{Status: storage.JobStatusDone}, "Done"},
+		{"applied", storage.ReviewJob{Status: storage.JobStatusApplied}, "Done"},
+		{"rebased", storage.ReviewJob{Status: storage.JobStatusRebased}, "Done"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := combinedStatus(tt.job)
+			got := statusLabel(tt.job)
 			if got != tt.want {
-				t.Errorf("combinedStatus() = %q, want %q", got, tt.want)
+				t.Errorf("statusLabel() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestCombinedStatusColor(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-
+func TestStatusColor(t *testing.T) {
 	tests := []struct {
-		name      string
-		job       storage.ReviewJob
-		wantStyle lipgloss.Style
+		name   string
+		status storage.JobStatus
+		want   lipgloss.TerminalColor
 	}{
-		{"queued", storage.ReviewJob{Status: storage.JobStatusQueued}, queuedStyle},
-		{"running", storage.ReviewJob{Status: storage.JobStatusRunning}, runningStyle},
-		{"failed", storage.ReviewJob{Status: storage.JobStatusFailed}, failedStyle},
-		{"canceled", storage.ReviewJob{Status: storage.JobStatusCanceled}, canceledStyle},
-		{"done pass", storage.ReviewJob{Status: storage.JobStatusDone, Verdict: strPtr("P")}, passStyle},
-		{"done fail", storage.ReviewJob{Status: storage.JobStatusDone, Verdict: strPtr("F")}, failStyle},
-		{"done unexpected verdict", storage.ReviewJob{Status: storage.JobStatusDone, Verdict: strPtr("X")}, failStyle},
-		{"done nil verdict", storage.ReviewJob{Status: storage.JobStatusDone}, readyStyle},
-		{"applied nil verdict", storage.ReviewJob{Status: storage.JobStatusApplied}, readyStyle},
-		{"rebased nil verdict", storage.ReviewJob{Status: storage.JobStatusRebased}, readyStyle},
-		{"unknown status", storage.ReviewJob{Status: "unknown"}, queuedStyle},
+		{"queued", storage.JobStatusQueued, queuedStyle.GetForeground()},
+		{"running", storage.JobStatusRunning, runningStyle.GetForeground()},
+		{"done", storage.JobStatusDone, doneStyle.GetForeground()},
+		{"applied", storage.JobStatusApplied, doneStyle.GetForeground()},
+		{"rebased", storage.JobStatusRebased, doneStyle.GetForeground()},
+		{"failed", storage.JobStatusFailed, failedStyle.GetForeground()},
+		{"canceled", storage.JobStatusCanceled, canceledStyle.GetForeground()},
+		{"unknown", storage.JobStatus("unknown"), nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := combinedStatusColor(tt.job)
-			want := tt.wantStyle.GetForeground()
-			if got != want {
-				t.Errorf("combinedStatusColor() = %v, want %v", got, want)
+			got := statusColor(tt.status)
+			if got != tt.want {
+				t.Errorf("statusColor(%q) = %v, want %v", tt.status, got, tt.want)
 			}
 		})
 	}
 
-	// Verify Error (failedStyle) and Fail (failStyle) use different colors
-	errorColor := failedStyle.GetForeground()
-	failColor := failStyle.GetForeground()
-	if errorColor == failColor {
-		t.Errorf("Error and Fail should have distinct colors, both are %v", errorColor)
+	// Error (failedStyle/orange) and Fail (failStyle/red) must be distinct
+	if failedStyle.GetForeground() == failStyle.GetForeground() {
+		t.Error("Error and Fail should have distinct colors")
+	}
+}
+
+func TestVerdictColor(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	tests := []struct {
+		name    string
+		verdict *string
+		want    lipgloss.TerminalColor
+	}{
+		{"pass", strPtr("P"), passStyle.GetForeground()},
+		{"fail", strPtr("F"), failStyle.GetForeground()},
+		{"unexpected", strPtr("X"), failStyle.GetForeground()},
+		{"nil", nil, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := verdictColor(tt.verdict)
+			if got != tt.want {
+				t.Errorf("verdictColor() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -2340,16 +2422,22 @@ func TestMigrateColumnConfig(t *testing.T) {
 			wantColOrder: nil,
 		},
 		{
+			name:         "combined status default order resets",
+			columnOrder:  []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "closed"},
+			wantDirty:    true,
+			wantColOrder: nil,
+		},
+		{
 			name:         "custom order preserved",
-			columnOrder:  []string{"repo", "ref", "agent", "status", "queued", "elapsed", "branch", "closed"},
+			columnOrder:  []string{"repo", "ref", "agent", "status", "pf", "queued", "elapsed", "branch", "closed"},
 			wantDirty:    false,
-			wantColOrder: []string{"repo", "ref", "agent", "status", "queued", "elapsed", "branch", "closed"},
+			wantColOrder: []string{"repo", "ref", "agent", "status", "pf", "queued", "elapsed", "branch", "closed"},
 		},
 		{
 			name:         "current default order preserved",
-			columnOrder:  []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "closed"},
+			columnOrder:  []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "pf", "closed"},
 			wantDirty:    false,
-			wantColOrder: []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "closed"},
+			wantColOrder: []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "pf", "closed"},
 		},
 	}
 
@@ -2370,6 +2458,30 @@ func TestMigrateColumnConfig(t *testing.T) {
 				t.Errorf("HiddenColumns = %v, want %v", cfg.HiddenColumns, tt.wantHidden)
 			}
 		})
+	}
+}
+
+func TestParseColumnOrderAppendsMissing(t *testing.T) {
+	// A custom order saved before the pf column existed should get
+	// pf appended automatically by resolveColumnOrder.
+	oldCustom := []string{"repo", "ref", "agent", "status", "queued", "elapsed", "branch", "closed"}
+	got := parseColumnOrder(oldCustom)
+
+	// Verify existing columns are in the user's order
+	wantPrefix := []int{colRepo, colRef, colAgent, colStatus, colQueued, colElapsed, colBranch, colHandled}
+	if !slices.Equal(got[:len(wantPrefix)], wantPrefix) {
+		t.Errorf("prefix = %v, want %v", got[:len(wantPrefix)], wantPrefix)
+	}
+
+	// pf must be appended exactly once
+	pfCount := 0
+	for _, c := range got {
+		if c == colPF {
+			pfCount++
+		}
+	}
+	if pfCount != 1 {
+		t.Errorf("expected pf to appear once, got %d in %v", pfCount, got)
 	}
 }
 
