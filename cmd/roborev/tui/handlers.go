@@ -81,11 +81,11 @@ func (m model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHomeKey()
 	case "up":
 		return m.handleUpKey()
-	case "k", "left":
+	case "j", "left":
 		return m.handlePrevKey()
 	case "down":
 		return m.handleDownKey()
-	case "j", "right":
+	case "k", "right":
 		return m.handleNextKey()
 	case "pgup":
 		return m.handlePageUpKey()
@@ -197,9 +197,9 @@ func (m model) handleHomeKey() (tea.Model, tea.Cmd) {
 func (m model) handleUpKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
 	case viewQueue:
-		prevIdx := m.findPrevVisibleJob(m.selectedIdx)
-		if prevIdx >= 0 {
-			m.selectedIdx = prevIdx
+		nextIdx := m.findNextVisibleJob(m.selectedIdx)
+		if nextIdx >= 0 {
+			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
 		} else {
 			m.setFlash("No newer review", 2*time.Second, viewQueue)
@@ -224,22 +224,22 @@ func (m model) handleUpKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
+func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
 	case viewQueue:
-		prevIdx := m.findPrevVisibleJob(m.selectedIdx)
-		if prevIdx >= 0 {
-			m.selectedIdx = prevIdx
+		nextIdx := m.findNextVisibleJob(m.selectedIdx)
+		if nextIdx >= 0 {
+			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
 		}
 	case viewReview:
-		prevIdx := m.findPrevViewableJob()
-		if prevIdx >= 0 {
+		nextIdx := m.findNextViewableJob()
+		if nextIdx >= 0 {
 			m.closeFixPanel()
-			m.selectedIdx = prevIdx
+			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
 			m.reviewScroll = 0
-			job := m.jobs[prevIdx]
+			job := m.jobs[nextIdx]
 			switch job.Status {
 			case storage.JobStatusDone:
 				return m, m.fetchReview(job.ID)
@@ -255,12 +255,12 @@ func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
 			m.setFlash("No newer review", 2*time.Second, viewReview)
 		}
 	case viewKindPrompt:
-		prevIdx := m.findPrevPromptableJob()
-		if prevIdx >= 0 {
-			m.selectedIdx = prevIdx
+		nextIdx := m.findNextPromptableJob()
+		if nextIdx >= 0 {
+			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
 			m.promptScroll = 0
-			job := m.jobs[prevIdx]
+			job := m.jobs[nextIdx]
 			if job.Status == storage.JobStatusDone {
 				return m, m.fetchReviewForPrompt(job.ID)
 			} else if job.Status == storage.JobStatusRunning && job.Prompt != "" {
@@ -275,7 +275,7 @@ func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
 		}
 	case viewLog:
 		if m.logFromView == viewTasks {
-			idx := m.findPrevLoggableFixJob()
+			idx := m.findNextLoggableFixJob()
 			if idx >= 0 {
 				m.fixSelectedIdx = idx
 				job := m.fixJobs[idx]
@@ -285,11 +285,11 @@ func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
 				)
 			}
 		} else {
-			prevIdx := m.findPrevLoggableJob()
-			if prevIdx >= 0 {
-				m.selectedIdx = prevIdx
+			nextIdx := m.findNextLoggableJob()
+			if nextIdx >= 0 {
+				m.selectedIdx = nextIdx
 				m.updateSelectedJobID()
-				job := m.jobs[prevIdx]
+				job := m.jobs[nextIdx]
 				m.logStreaming = false
 				return m.openLogView(
 					job.ID, job.Status, m.logFromView,
@@ -304,11 +304,11 @@ func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
 func (m model) handleDownKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
 	case viewQueue:
-		nextIdx := m.findNextVisibleJob(m.selectedIdx)
-		if nextIdx >= 0 {
-			m.selectedIdx = nextIdx
+		prevIdx := m.findPrevVisibleJob(m.selectedIdx)
+		if prevIdx >= 0 {
+			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
-			if cmd := m.maybePrefetch(nextIdx); cmd != nil {
+			if cmd := m.maybePrefetch(prevIdx); cmd != nil {
 				return m, cmd
 			}
 		} else if m.canPaginate() {
@@ -335,14 +335,14 @@ func (m model) handleDownKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleNextKey() (tea.Model, tea.Cmd) {
+func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
 	case viewQueue:
-		nextIdx := m.findNextVisibleJob(m.selectedIdx)
-		if nextIdx >= 0 {
-			m.selectedIdx = nextIdx
+		prevIdx := m.findPrevVisibleJob(m.selectedIdx)
+		if prevIdx >= 0 {
+			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
-			if cmd := m.maybePrefetch(nextIdx); cmd != nil {
+			if cmd := m.maybePrefetch(prevIdx); cmd != nil {
 				return m, cmd
 			}
 		} else if m.canPaginate() {
@@ -350,13 +350,13 @@ func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 			return m, m.fetchMoreJobs()
 		}
 	case viewReview:
-		nextIdx := m.findNextViewableJob()
-		if nextIdx >= 0 {
+		prevIdx := m.findPrevViewableJob()
+		if prevIdx >= 0 {
 			m.closeFixPanel()
-			m.selectedIdx = nextIdx
+			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
 			m.reviewScroll = 0
-			job := m.jobs[nextIdx]
+			job := m.jobs[prevIdx]
 			switch job.Status {
 			case storage.JobStatusDone:
 				return m, m.fetchReview(job.ID)
@@ -376,12 +376,12 @@ func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 			m.setFlash("No older review", 2*time.Second, viewReview)
 		}
 	case viewKindPrompt:
-		nextIdx := m.findNextPromptableJob()
-		if nextIdx >= 0 {
-			m.selectedIdx = nextIdx
+		prevIdx := m.findPrevPromptableJob()
+		if prevIdx >= 0 {
+			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
 			m.promptScroll = 0
-			job := m.jobs[nextIdx]
+			job := m.jobs[prevIdx]
 			if job.Status == storage.JobStatusDone {
 				return m, m.fetchReviewForPrompt(job.ID)
 			} else if job.Status == storage.JobStatusRunning && job.Prompt != "" {
@@ -400,7 +400,7 @@ func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 		}
 	case viewLog:
 		if m.logFromView == viewTasks {
-			idx := m.findNextLoggableFixJob()
+			idx := m.findPrevLoggableFixJob()
 			if idx >= 0 {
 				m.fixSelectedIdx = idx
 				job := m.fixJobs[idx]
@@ -410,11 +410,11 @@ func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 				)
 			}
 		} else {
-			nextIdx := m.findNextLoggableJob()
-			if nextIdx >= 0 {
-				m.selectedIdx = nextIdx
+			prevIdx := m.findPrevLoggableJob()
+			if prevIdx >= 0 {
+				m.selectedIdx = prevIdx
 				m.updateSelectedJobID()
-				job := m.jobs[nextIdx]
+				job := m.jobs[prevIdx]
 				m.logStreaming = false
 				return m.openLogView(
 					job.ID, job.Status, m.logFromView,
@@ -435,11 +435,11 @@ func (m model) handlePageUpKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
 	case viewQueue:
 		for range pageSize {
-			prevIdx := m.findPrevVisibleJob(m.selectedIdx)
-			if prevIdx < 0 {
+			nextIdx := m.findNextVisibleJob(m.selectedIdx)
+			if nextIdx < 0 {
 				break
 			}
-			m.selectedIdx = prevIdx
+			m.selectedIdx = nextIdx
 		}
 		m.updateSelectedJobID()
 	case viewReview:
@@ -466,12 +466,12 @@ func (m model) handlePageDownKey() (tea.Model, tea.Cmd) {
 	case viewQueue:
 		reachedEnd := false
 		for range pageSize {
-			nextIdx := m.findNextVisibleJob(m.selectedIdx)
-			if nextIdx < 0 {
+			prevIdx := m.findPrevVisibleJob(m.selectedIdx)
+			if prevIdx < 0 {
 				reachedEnd = true
 				break
 			}
-			m.selectedIdx = nextIdx
+			m.selectedIdx = prevIdx
 		}
 		m.updateSelectedJobID()
 		if reachedEnd && m.canPaginate() {

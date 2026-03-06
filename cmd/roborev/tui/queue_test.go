@@ -96,20 +96,20 @@ func TestTUIQueueNavigation(t *testing.T) {
 			wantJobID: 1,
 		},
 		{
-			name:      "left arrow moves up",
+			name:      "left arrow moves down",
 			jobs:      threeJobs,
 			startIdx:  1,
 			key:       tea.KeyLeft,
-			wantIdx:   0,
-			wantJobID: 1,
+			wantIdx:   2,
+			wantJobID: 3,
 		},
 		{
-			name:      "right arrow moves down",
+			name:      "right arrow moves up",
 			jobs:      threeJobs,
 			startIdx:  1,
 			key:       tea.KeyRight,
-			wantIdx:   2,
-			wantJobID: 3,
+			wantIdx:   0,
+			wantJobID: 1,
 		},
 		{
 			name:      "g jumps to top (unfiltered)",
@@ -993,6 +993,59 @@ func TestTUIPageDownBlockedWhileLoadingJobs(t *testing.T) {
 	}
 }
 
+func TestTUIPageUpDownMovesSelection(t *testing.T) {
+	// Verify pgup moves toward newer (lower index) and pgdown moves
+	// toward older (higher index), including with hidden jobs.
+	m := newModel("http://localhost", withExternalIODisabled())
+	m.currentView = viewQueue
+	m.hideClosed = true
+	m.height = 15 // pageSize = max(1, 15-10) = 5
+
+	// 10 visible jobs plus one hidden (canceled + hideClosed) in the
+	// middle.
+	m.jobs = []storage.ReviewJob{
+		makeJob(1), // idx 0 (newest)
+		makeJob(2), // idx 1
+		makeJob(3), // idx 2
+		makeJob(4), // idx 3
+		makeJob(5), // idx 4
+		makeJob(6, withStatus(storage.JobStatusCanceled)), // idx 5 hidden
+		makeJob(7),  // idx 6
+		makeJob(8),  // idx 7
+		makeJob(9),  // idx 8
+		makeJob(10), // idx 9
+		makeJob(11), // idx 10 (oldest)
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	// pgdown should move 5 visible steps toward older (higher index),
+	// skipping the hidden job at index 5.
+	m2, _ := pressSpecial(m, tea.KeyPgDown)
+	if m2.selectedIdx != 6 {
+		t.Errorf(
+			"pgdown: expected selectedIdx=6 (skipped hidden idx 5), got %d",
+			m2.selectedIdx,
+		)
+	}
+	if m2.selectedJobID != 7 {
+		t.Errorf("pgdown: expected selectedJobID=7, got %d", m2.selectedJobID)
+	}
+
+	// pgup from idx 6 should move 5 visible steps toward newer (lower
+	// index), again skipping the hidden job.
+	m3, _ := pressSpecial(m2, tea.KeyPgUp)
+	if m3.selectedIdx != 0 {
+		t.Errorf(
+			"pgup: expected selectedIdx=0 (back to newest), got %d",
+			m3.selectedIdx,
+		)
+	}
+	if m3.selectedJobID != 1 {
+		t.Errorf("pgup: expected selectedJobID=1, got %d", m3.selectedJobID)
+	}
+}
+
 func TestTUIResizeBehavior(t *testing.T) {
 	tests := []struct {
 		name                      string
@@ -1636,16 +1689,16 @@ func TestTUIQueueNavigationSequences(t *testing.T) {
 		t.Errorf("after 'g', expected selectedIdx 0, got %d", m.selectedIdx)
 	}
 
-	// Sequence: Right (down/next), Left (up/prev)
+	// Sequence: Left (down/prev), Right (up/next)
 	// We are at index 0
-	m, _ = pressSpecial(m, tea.KeyRight)
+	m, _ = pressSpecial(m, tea.KeyLeft)
 	if m.selectedIdx != 1 {
-		t.Errorf("after KeyRight, expected selectedIdx 1, got %d", m.selectedIdx)
+		t.Errorf("after KeyLeft, expected selectedIdx 1, got %d", m.selectedIdx)
 	}
 
-	m, _ = pressSpecial(m, tea.KeyLeft)
+	m, _ = pressSpecial(m, tea.KeyRight)
 	if m.selectedIdx != 0 {
-		t.Errorf("after KeyLeft, expected selectedIdx 0, got %d", m.selectedIdx)
+		t.Errorf("after KeyRight, expected selectedIdx 0, got %d", m.selectedIdx)
 	}
 }
 
