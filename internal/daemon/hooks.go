@@ -1,13 +1,20 @@
 package daemon
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	neturl "net/url"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/roborev-dev/roborev/internal/config"
 	gitpkg "github.com/roborev-dev/roborev/internal/git"
@@ -144,6 +151,17 @@ func (hr *HookRunner) handleEvent(event Event) {
 			continue
 		}
 
+		if hook.Type == "webhook" {
+			if hook.URL == "" {
+				continue
+			}
+
+			fired++
+			hr.wg.Add(1)
+			go hr.postWebhook(hook.URL, event)
+			continue
+		}
+
 		cmd := resolveCommand(hook, event)
 		if cmd == "" {
 			continue
@@ -269,4 +287,68 @@ func (hr *HookRunner) runHook(command, workDir string) {
 	if len(output) > 0 {
 		hr.logger.Printf("Hook output (cmd=%q): %s", command, output)
 	}
+}
+
+func (hr *HookRunner) postWebhook(webhookURL string, event Event) {
+	defer hr.wg.Done()
+	safeURL := redactWebhookURL(webhookURL)
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		hr.logger.Printf("Webhook error (url=%q): marshal event: %v", safeURL, err)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(payload))
+	if err != nil {
+		hr.logger.Printf("Webhook error (url=%q): build request: %v", safeURL, redactURLError(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		hr.logger.Printf("Webhook error (url=%q): %v", safeURL, redactURLError(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if len(body) > 0 {
+			hr.logger.Printf("Webhook error (url=%q): status %s: %s", safeURL, resp.Status, strings.TrimSpace(string(body)))
+			return
+		}
+		hr.logger.Printf("Webhook error (url=%q): status %s", safeURL, resp.Status)
+	}
+}
+
+func redactWebhookURL(raw string) string {
+	parsed, err := neturl.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid webhook url>"
+	}
+
+	redacted := &neturl.URL{
+		Scheme: parsed.Scheme,
+		Host:   parsed.Host,
+	}
+
+	if p := parsed.EscapedPath(); p != "" && p != "/" {
+		redacted.Path = "/..."
+	}
+
+	return redacted.String()
+}
+
+// redactURLError unwraps *url.Error to return only its inner
+// error, preventing Go's HTTP client from leaking the raw URL
+// (including secret path segments) in log output.
+func redactURLError(err error) error {
+	var ue *neturl.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
