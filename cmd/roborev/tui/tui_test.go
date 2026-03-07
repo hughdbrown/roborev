@@ -1088,6 +1088,147 @@ func TestTUIColumnOptionsCanEnableTasksWorkflow(t *testing.T) {
 		t.Fatal("expected advanced.tasks_enabled to persist as true")
 	}
 }
+
+func TestTUIColumnOptionsCanDisableMouse(t *testing.T) {
+	setupTuiTestEnv(t)
+
+	m := newModel(testServerAddr, withExternalIODisabled())
+	m.currentView = viewQueue
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	updated := result.(model)
+	if updated.currentView != viewColumnOptions {
+		t.Fatalf("expected column options view, got %v", updated.currentView)
+	}
+
+	idx := -1
+	for i, opt := range updated.colOptionsList {
+		if opt.id == colOptionMouse {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatal("expected mouse option in column options")
+	}
+	updated.colOptionsIdx = idx
+
+	result, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	toggled := result.(model)
+	if toggled.mouseEnabled {
+		t.Fatal("expected mouse to be disabled after toggle")
+	}
+	if cmd == nil {
+		t.Fatal("expected mouse toggle command after disabling mouse")
+	}
+	msgs := collectMsgs(cmd)
+	if !hasMsgType(msgs, "tea.disableMouseMsg") {
+		t.Fatalf("expected disableMouseMsg after disabling mouse, got %v", msgs)
+	}
+
+	result, cmd = toggled.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	closed := result.(model)
+	if closed.currentView != viewQueue {
+		t.Fatalf("expected to return to queue view, got %v", closed.currentView)
+	}
+	if cmd == nil {
+		t.Fatal("expected save command after closing column options")
+	}
+	msgs = collectMsgs(cmd)
+	if len(msgs) > 0 {
+		if last := msgs[len(msgs)-1]; last != nil {
+			if errMsg, ok := last.(configSaveErrMsg); ok {
+				t.Fatalf("save config failed: %v", errMsg.err)
+			}
+		}
+	}
+
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal failed: %v", err)
+	}
+	if cfg.MouseEnabled {
+		t.Fatal("expected mouse_enabled to persist as false")
+	}
+}
+
+func TestTUIColumnOptionsCanReEnableMouse(t *testing.T) {
+	setupTuiTestEnv(t)
+
+	m := newModel(testServerAddr, withExternalIODisabled())
+	m.currentView = viewQueue
+	m.width = 120
+	m.height = 20
+	m.jobs = []storage.ReviewJob{
+		makeJob(1),
+		makeJob(2),
+		makeJob(3),
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	updated := result.(model)
+
+	idx := -1
+	for i, opt := range updated.colOptionsList {
+		if opt.id == colOptionMouse {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatal("expected mouse option in column options")
+	}
+	updated.colOptionsIdx = idx
+
+	result, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	disabled := result.(model)
+	if disabled.mouseEnabled {
+		t.Fatal("expected mouse to be disabled after first toggle")
+	}
+
+	result, cmd := disabled.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	reenabled := result.(model)
+	if !reenabled.mouseEnabled {
+		t.Fatal("expected mouse to be enabled after second toggle")
+	}
+	if cmd == nil {
+		t.Fatal("expected mouse toggle command after enabling mouse")
+	}
+	msgs := collectMsgs(cmd)
+	if !hasMsgType(msgs, "tea.enableMouseCellMotionMsg") {
+		t.Fatalf("expected enableMouseCellMotionMsg after enabling mouse, got %v", msgs)
+	}
+
+	result, _ = reenabled.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	closed := result.(model)
+	if closed.currentView != viewQueue {
+		t.Fatalf("expected to return to queue view, got %v", closed.currentView)
+	}
+
+	m2, _ := updateModel(t, closed, mouseWheelDown())
+	if m2.selectedIdx != 1 || m2.selectedJobID != 2 {
+		t.Fatalf("expected wheel to work after re-enabling mouse, got idx=%d id=%d", m2.selectedIdx, m2.selectedJobID)
+	}
+}
+
+func TestNewModelLoadsMouseDisabledFromConfig(t *testing.T) {
+	tmpDir := setupTuiTestEnv(t)
+
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("mouse_enabled = false\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	m := newModel(testServerAddr)
+	if m.mouseEnabled {
+		t.Fatal("expected newModel to load mouse_enabled = false from config")
+	}
+	if len(programOptionsForModel(m)) != 1 {
+		t.Fatalf("expected startup options without mouse capture when disabled, got %d options", len(programOptionsForModel(m)))
+	}
+}
 func TestTUISelection(t *testing.T) {
 	t.Run("MaintainedOnInsert", func(t *testing.T) {
 		m := newModel(testServerAddr, withExternalIODisabled())
