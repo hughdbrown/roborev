@@ -194,6 +194,26 @@ still not json
 			expectedResult: "First block\nSecond block",
 		},
 		{
+			name: "AssistantFallbackDropsNarrationBeforeToolUse",
+			input: `{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":"I am checking the relevant files first."}}
+{"type":"tool_use","name":"Read","input":{"file_path":"redacted.go"}}
+{"type":"tool_result","content":"redacted"}
+{"type":"assistant","message":{"content":"## Review Findings\n- **Severity**: Low; **Problem**: Final finding."}}
+`,
+			expectedResult: "## Review Findings\n- **Severity**: Low; **Problem**: Final finding.",
+		},
+		{
+			name: "AssistantFallbackPrefersFinalPostToolSegment",
+			input: `{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":"## Review Findings\n- **Severity**: Low; **Problem**: Earlier provisional finding."}}
+{"type":"tool_use","name":"Read","input":{"file_path":"redacted.go"}}
+{"type":"tool_result","content":"redacted"}
+{"type":"assistant","message":{"content":"## Review Findings\n- **Severity**: Medium; **Problem**: Final persisted finding."}}
+`,
+			expectedResult: "## Review Findings\n- **Severity**: Medium; **Problem**: Final persisted finding.",
+		},
+		{
 			name: "ContentBlockArrayWithToolUse",
 			input: `{"type":"system","subtype":"init"}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Let me check..."},{"type":"tool_use","name":"Read"}]}}
@@ -280,7 +300,7 @@ func TestExtractContentText(t *testing.T) {
 		{
 			name: "MixedBlockTypes",
 			raw:  `[{"type":"text","text":"Analysis"},{"type":"tool_use","name":"Read"},{"type":"text","text":"Done"}]`,
-			want: "Analysis\nDone",
+			want: "Done",
 		},
 		{
 			name: "EmptyArray",
