@@ -73,22 +73,22 @@ func GetCommitInfo(repoPath, sha string) (*CommitInfo, error) {
 	}, nil
 }
 
-// GetCurrentBranch returns the current branch name, or empty string if detached HEAD
+// GetCurrentBranch returns the current branch name, or empty string if detached HEAD.
+// Uses symbolic-ref (without --short) and strips refs/heads/ directly, because both
+// rev-parse --abbrev-ref and symbolic-ref --short can return "heads/branch" when the
+// name is ambiguous with another ref (remote tracking branch, tag, etc.).
 func GetCurrentBranch(repoPath string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := exec.Command("git", "symbolic-ref", "HEAD")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
 	if err != nil {
+		// Detached HEAD or not a git repo
 		return ""
 	}
 
-	branch := strings.TrimSpace(string(out))
-	if branch == "HEAD" {
-		// Detached HEAD state
-		return ""
-	}
-	return branch
+	ref := strings.TrimSpace(string(out))
+	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
 // LocalBranchName strips the "origin/" prefix from a branch name if present.

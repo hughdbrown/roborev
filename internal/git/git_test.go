@@ -551,10 +551,10 @@ func TestGetCurrentBranch(t *testing.T) {
 	t.Run("returns current branch", func(t *testing.T) {
 		repo := NewTestRepoWithCommit(t)
 
-		expectedBranch := repo.Run("rev-parse", "--abbrev-ref", "HEAD")
-
 		branch := GetCurrentBranch(repo.Dir)
-		assert.Equal(t, expectedBranch, branch, "expected %s, got %s", expectedBranch, branch)
+		assert.NotEmpty(t, branch)
+		assert.NotContains(t, branch, "heads/",
+			"branch should not have heads/ prefix")
 	})
 
 	t.Run("returns branch after checkout", func(t *testing.T) {
@@ -563,7 +563,7 @@ func TestGetCurrentBranch(t *testing.T) {
 		repo.Run("checkout", "-b", "feature-branch")
 
 		branch := GetCurrentBranch(repo.Dir)
-		assert.Equal(t, "feature-branch", branch, "expected 'feature-branch', got %s", branch)
+		assert.Equal(t, "feature-branch", branch)
 	})
 
 	t.Run("returns empty for detached HEAD", func(t *testing.T) {
@@ -573,13 +573,61 @@ func TestGetCurrentBranch(t *testing.T) {
 		repo.Run("checkout", sha)
 
 		branch := GetCurrentBranch(repo.Dir)
-		assert.Empty(t, branch, "expected empty string for detached HEAD, got %s", branch)
+		assert.Empty(t, branch)
 	})
 
 	t.Run("returns empty for non-repo", func(t *testing.T) {
 		nonRepo := t.TempDir()
 		branch := GetCurrentBranch(nonRepo)
-		assert.Empty(t, branch, "expected empty string for non-repo, got %s", branch)
+		assert.Empty(t, branch)
+	})
+
+	t.Run("no heads prefix with ambiguous remote ref", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+
+		// Create a branch and a remote-tracking ref that share
+		// the same suffix. rev-parse --abbrev-ref and symbolic-ref
+		// --short both add "heads/" to disambiguate.
+		repo.Run("checkout", "-b", "user/feat")
+		sha := repo.HeadSHA()
+		repo.Run("update-ref", "refs/remotes/user/feat", sha)
+
+		branch := GetCurrentBranch(repo.Dir)
+		assert.Equal(t, "user/feat", branch,
+			"should return clean branch name with ambiguous remote ref")
+	})
+
+	t.Run("no heads prefix with ambiguous tag", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+
+		// A tag with the same name as the branch causes
+		// symbolic-ref --short to return "heads/user/feat".
+		repo.Run("checkout", "-b", "user/feat")
+		repo.Run("tag", "user/feat")
+
+		branch := GetCurrentBranch(repo.Dir)
+		assert.Equal(t, "user/feat", branch,
+			"should return clean branch name with ambiguous tag")
+	})
+
+	t.Run("no heads prefix in linked worktree with ambiguous refs", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+
+		// Create a worktree on "user/feat/view", then add a remote
+		// ref that shares the suffix. Both rev-parse --abbrev-ref
+		// and symbolic-ref --short return "heads/user/feat/view"
+		// in linked worktrees to disambiguate.
+		wt := repo.AddWorktree("user/feat/view")
+		sha := repo.HeadSHA()
+		repo.Run(
+			"update-ref",
+			"refs/remotes/user/feat/view",
+			sha,
+		)
+
+		branch := GetCurrentBranch(wt.Dir)
+		assert.Equal(t, "user/feat/view", branch,
+			"linked worktree should return clean branch name")
 	})
 }
 
