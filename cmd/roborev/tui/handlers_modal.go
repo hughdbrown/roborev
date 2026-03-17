@@ -269,6 +269,7 @@ func (m model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.logStreaming = false
 				return m, m.cancelJob(
 					job.ID, oldStatus, oldFinishedAt,
+					false,
 				)
 			}
 		}
@@ -378,7 +379,12 @@ func (m model) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "ctrl+c", "ctrl+d", "q":
+	case "ctrl+c", "ctrl+d":
+		return m, tea.Quit
+	case "q":
+		if m.noQuit {
+			return m, nil
+		}
 		return m, tea.Quit
 	case "esc", "T":
 		m.currentView = viewQueue
@@ -434,7 +440,9 @@ func (m model) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				job.Status = storage.JobStatusCanceled
 				now := time.Now()
 				job.FinishedAt = &now
-				return m, m.cancelJob(job.ID, oldStatus, oldFinishedAt)
+				return m, m.cancelJob(
+					job.ID, oldStatus, oldFinishedAt, false,
+				)
 			}
 		}
 		return m, nil

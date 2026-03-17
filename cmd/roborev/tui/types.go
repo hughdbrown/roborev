@@ -146,10 +146,11 @@ type closedResultMsg struct {
 	err              error
 }
 type cancelResultMsg struct {
-	jobID         int64
-	oldState      storage.JobStatus
-	oldFinishedAt *time.Time
-	err           error
+	jobID            int64
+	oldState         storage.JobStatus
+	oldFinishedAt    *time.Time
+	restoreSelection bool
+	err              error
 }
 type rerunResultMsg struct {
 	jobID         int64
@@ -157,6 +158,8 @@ type rerunResultMsg struct {
 	oldStartedAt  *time.Time
 	oldFinishedAt *time.Time
 	oldError      string
+	oldClosed     *bool
+	oldVerdict    *string
 	err           error
 }
 type errMsg error
@@ -174,7 +177,15 @@ type updateCheckMsg struct {
 	isDevBuild bool   // True if running a dev build
 }
 type reposMsg struct {
-	repos []repoFilterItem
+	repos          []repoFilterItem
+	branchFiltered bool // true if fetched with a branch constraint
+}
+
+// repoNamesMsg delivers the display-name-to-root-paths mapping from
+// /api/repos, used by the control socket to resolve display names in
+// set-filter commands. Fetched once at init.
+type repoNamesMsg struct {
+	names map[string][]string // display name → root paths
 }
 type branchesMsg struct {
 	backfillCount int // Number of branches successfully backfilled to the database
@@ -290,11 +301,17 @@ func withAutoFilterRepo(repo string) option {
 type options struct {
 	repoFilter        string // --repo flag: lock filter to this repo path
 	branchFilter      string // --branch flag: lock filter to this branch
+	noQuit            bool   // --no-quit flag: suppress keyboard quit
 	disableExternalIO bool   // tests: disable daemon/config/git calls
 	autoFilterRepo    bool   // tests: simulate auto_filter_repo config
 	autoFilterBranch  bool   // tests: simulate auto_filter_branch config
 	cwdRepoRoot       string // tests: simulate detected repo root
 	cwdBranch         string // tests: simulate detected branch
+}
+
+// withNoQuit disables keyboard-initiated quit (q key).
+func withNoQuit() option {
+	return func(o *options) { o.noQuit = true }
 }
 
 // errNoLog is a sentinel error returned when the job log API

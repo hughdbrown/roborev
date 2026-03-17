@@ -7,6 +7,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -310,6 +311,11 @@ type model struct {
 	// Display name cache (keyed by repo path)
 	displayNames map[string]string
 
+	// Repo name lookup (display name → root paths), populated from
+	// /api/repos at init. Used by control socket set-filter to resolve
+	// display names to the root paths that the daemon API expects.
+	repoNames map[string][]string
+
 	// Branch name cache (keyed by job ID) - caches derived branches to avoid repeated git calls
 	branchNames map[int64]string
 
@@ -368,8 +374,11 @@ type model struct {
 
 	distractionFree bool // hide status line, headers, footer, scroll indicator
 	clipboard       ClipboardWriter
-	tasksEnabled    bool // Enables advanced tasks workflow in the TUI
-	mouseEnabled    bool // Enables mouse capture and mouse-driven interactions in the TUI
+	tasksEnabled    bool          // Enables advanced tasks workflow in the TUI
+	mouseEnabled    bool          // Enables mouse capture and mouse-driven interactions in the TUI
+	noQuit          bool          // Suppress keyboard quit (for managed TUI instances)
+	controlSocket   string        // Socket path for runtime metadata updates (empty if disabled)
+	ready           chan struct{} // Closed on first Update; signals event loop is running
 
 	// Review view navigation
 	reviewFromView viewKind // View to return to when exiting review (queue or tasks)
@@ -543,6 +552,8 @@ func newModel(serverAddr string, opts ...option) model {
 		mdCache:             newMarkdownCache(tabWidth),
 		tasksEnabled:        tasksEnabled,
 		mouseEnabled:        mouseEnabled,
+		noQuit:              opt.noQuit,
+		ready:               make(chan struct{}),
 		colBordersOn:        columnBorders,
 		hiddenColumns:       hiddenCols,
 		columnOrder:         colOrder,
@@ -558,6 +569,7 @@ func (m model) Init() tea.Cmd {
 		m.tick(),
 		m.fetchJobs(),
 		m.fetchStatus(),
+		m.fetchRepoNames(),
 		m.checkForUpdate(),
 	)
 }
@@ -675,6 +687,16 @@ func mouseCaptureCmd(v viewKind, mouseEnabled bool) tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Signal that the event loop is running (once). The control
+	// listener waits on this before accepting connections.
+	if m.ready != nil {
+		select {
+		case <-m.ready:
+		default:
+			close(m.ready)
+		}
+	}
+
 	prevView := m.currentView
 
 	var result tea.Model
@@ -714,6 +736,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		result, cmd = m.handleCancelResultMsg(msg)
 	case rerunResultMsg:
 		result, cmd = m.handleRerunResultMsg(msg)
+	case repoNamesMsg:
+		result, cmd = m.handleRepoNamesMsg(msg)
 	case reposMsg:
 		result, cmd = m.handleReposMsg(msg)
 	case repoBranchesMsg:
@@ -751,6 +775,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			5*time.Second, m.currentView,
 		)
 		result = m
+	case controlSocketReadyMsg:
+		m.controlSocket = msg.socketPath
+		result = m
+	case controlQueryMsg:
+		result, cmd = m.handleControlQuery(msg)
+	case controlMutationMsg:
+		result, cmd = m.handleControlMutation(msg)
 	default:
 		// Unknown message types cannot change the view, so no mouse
 		// toggle is needed. If a new message type is added that can
@@ -820,9 +851,11 @@ func (m model) View() string {
 
 // Config holds resolved parameters for running the TUI.
 type Config struct {
-	ServerAddr   string
-	RepoFilter   string
-	BranchFilter string
+	ServerAddr    string
+	RepoFilter    string
+	BranchFilter  string
+	ControlSocket string // Unix socket path for external control (default: auto)
+	NoQuit        bool   // Suppress keyboard quit (for managed TUI instances)
 }
 
 func programOptionsForModel(m model) []tea.ProgramOption {
@@ -837,6 +870,9 @@ func programOptionsForModel(m model) []tea.ProgramOption {
 
 // Run starts the interactive TUI.
 func Run(cfg Config) error {
+	// Clean up sockets from dead TUI processes before starting
+	CleanupStaleTUIRuntimes()
+
 	var opts []option
 	if cfg.RepoFilter != "" {
 		opts = append(opts, withRepoFilter(cfg.RepoFilter))
@@ -844,12 +880,94 @@ func Run(cfg Config) error {
 	if cfg.BranchFilter != "" {
 		opts = append(opts, withBranchFilter(cfg.BranchFilter))
 	}
+	if cfg.NoQuit {
+		opts = append(opts, withNoQuit())
+	}
+	// Resolve socket path before creating the model so the
+	// model knows its socket path for runtime metadata updates.
+	socketPath := cfg.ControlSocket
+	if socketPath == "" {
+		socketPath = defaultControlSocketPath()
+		// Only tighten directory permissions for the default
+		// managed directory. Custom --control-socket paths may
+		// point anywhere (e.g. /tmp, repo root) and mutating
+		// their parent would be destructive.
+		if err := ensureSocketDir(
+			filepath.Dir(socketPath),
+		); err != nil {
+			log.Printf("warning: control socket disabled: %v", err)
+			socketPath = ""
+		}
+	}
+
 	m := newModel(cfg.ServerAddr, opts...)
 	p := tea.NewProgram(
 		m,
 		programOptionsForModel(m)...,
 	)
+
+	// Start the control listener after the event loop is running
+	// so that p.Send (used by control handlers) never blocks. The
+	// model closes m.ready on its first Update call. Skip if
+	// socketPath is empty (ensureSocketDir failed).
+	// cleanupDone is closed after socket/runtime cleanup finishes
+	// so Run() can wait for it before returning, preventing stale
+	// files if the process exits immediately after p.Run().
+	// programDone is closed after p.Run() returns so the goroutine
+	// can unblock if the program exits before m.ready fires.
+	cleanupDone := make(chan struct{})
+	programDone := make(chan struct{})
+	if socketPath != "" {
+		go func() {
+			defer close(cleanupDone)
+
+			// Wait for either the event loop to start or the
+			// program to exit (e.g. terminal init failure).
+			select {
+			case <-m.ready:
+			case <-programDone:
+				return
+			}
+
+			cleanup, err := startControlListener(socketPath, p)
+			if err != nil {
+				log.Printf(
+					"warning: control socket disabled: %v", err,
+				)
+				return
+			}
+
+			// Notify the model that the control socket is
+			// active so it can update runtime metadata on
+			// reconnect. This is deferred until after the
+			// listener succeeds to avoid advertising a
+			// socket that failed to bind.
+			p.Send(controlSocketReadyMsg{
+				socketPath: socketPath,
+			})
+
+			rtInfo := buildTUIRuntimeInfo(
+				socketPath, cfg.ServerAddr,
+			)
+			if err := WriteTUIRuntime(rtInfo); err != nil {
+				log.Printf(
+					"warning: failed to write TUI runtime info: %v",
+					err,
+				)
+			}
+
+			// Block until the program exits, then clean up.
+			p.Wait()
+			cleanup()
+			RemoveTUIRuntime()
+		}()
+	} else {
+		close(cleanupDone)
+	}
+
 	_, err := p.Run()
+	close(programDone)
+	<-cleanupDone
 	return err
 }
 

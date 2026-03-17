@@ -12,6 +12,8 @@ func tuiCmd() *cobra.Command {
 	var addr string
 	var repoFilter string
 	var branchFilter string
+	var controlSocket string
+	var noQuit bool
 
 	cmd := &cobra.Command{
 		Use:   "tui",
@@ -63,9 +65,11 @@ to the current branch. Use = syntax for explicit values:
 			}
 
 			return tui.Run(tui.Config{
-				ServerAddr:   addr,
-				RepoFilter:   repoFilter,
-				BranchFilter: branchFilter,
+				ServerAddr:    addr,
+				RepoFilter:    repoFilter,
+				BranchFilter:  branchFilter,
+				ControlSocket: controlSocket,
+				NoQuit:        noQuit,
 			})
 		},
 	}
@@ -84,6 +88,14 @@ to the current branch. Use = syntax for explicit values:
 		"lock filter to a branch (default: current branch)",
 	)
 	cmd.Flag("branch").NoOptDefVal = "HEAD"
+	cmd.Flags().StringVar(
+		&controlSocket, "control-socket", "",
+		"Unix socket path for external control (default: auto)",
+	)
+	cmd.Flags().BoolVar(
+		&noQuit, "no-quit", false,
+		"suppress keyboard quit (for managed TUI instances)",
+	)
 
 	return cmd
 }

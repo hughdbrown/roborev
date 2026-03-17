@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"slices"
 	"time"
 
@@ -232,11 +233,35 @@ func (m model) handleStatusMsg(msg statusMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleRepoNamesMsg stores the display-name-to-root-paths mapping
+// fetched from /api/repos at init, used by control socket set-filter.
+func (m model) handleRepoNamesMsg(
+	msg repoNamesMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.names != nil {
+		m.repoNames = msg.names
+	}
+	return m, nil
+}
+
 // handleReposMsg processes repo list results for the filter modal.
 func (m model) handleReposMsg(
 	msg reposMsg,
 ) (tea.Model, tea.Cmd) {
 	m.consecutiveErrors = 0
+
+	// Refresh repoNames when the modal fetch was unfiltered (no
+	// branch constraint), so newly registered repos are picked up.
+	// Skip branch-filtered responses — they are a subset and would
+	// clobber the authoritative mapping.
+	if !msg.branchFiltered {
+		names := make(map[string][]string, len(msg.repos))
+		for _, r := range msg.repos {
+			names[r.name] = r.rootPaths
+		}
+		m.repoNames = names
+	}
+
 	// Build filterTree from repos (all collapsed, no children)
 	m.filterTree = make([]treeFilterNode, len(msg.repos))
 	for i, r := range msg.repos {
@@ -610,6 +635,9 @@ func (m model) handleCancelResultMsg(
 	if msg.err != nil {
 		m.setJobStatus(msg.jobID, msg.oldState)
 		m.setJobFinishedAt(msg.jobID, msg.oldFinishedAt)
+		if msg.restoreSelection {
+			m.selectJobByID(msg.jobID)
+		}
 		m.err = msg.err
 	}
 	return m, nil
@@ -624,6 +652,10 @@ func (m model) handleRerunResultMsg(
 		m.setJobStartedAt(msg.jobID, msg.oldStartedAt)
 		m.setJobFinishedAt(msg.jobID, msg.oldFinishedAt)
 		m.setJobError(msg.jobID, msg.oldError)
+		m.mutateJob(msg.jobID, func(job *storage.ReviewJob) {
+			job.Closed = msg.oldClosed
+			job.Verdict = msg.oldVerdict
+		})
 		m.err = msg.err
 	}
 	return m, nil
@@ -681,9 +713,24 @@ func (m model) handleReconnectMsg(msg reconnectMsg) (tea.Model, tea.Cmd) {
 		if msg.version != "" {
 			m.daemonVersion = msg.version
 		}
+		// Update runtime metadata so external tools see the
+		// new daemon address after reconnect.
+		if m.controlSocket != "" {
+			rtInfo := buildTUIRuntimeInfo(
+				m.controlSocket, m.serverAddr,
+			)
+			if err := WriteTUIRuntime(rtInfo); err != nil {
+				log.Printf(
+					"warning: failed to update runtime info: %v",
+					err,
+				)
+			}
+		}
 		m.clearFetchFailed()
 		m.loadingJobs = true
-		cmds := []tea.Cmd{m.fetchJobs(), m.fetchStatus()}
+		cmds := []tea.Cmd{
+			m.fetchJobs(), m.fetchStatus(), m.fetchRepoNames(),
+		}
 		if cmd := m.fetchUnloadedBranches(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}

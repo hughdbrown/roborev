@@ -104,6 +104,7 @@ func (m model) handleCancelKey() (tea.Model, tea.Cmd) {
 		now := time.Now()
 		job.FinishedAt = &now
 		// Canceled jobs are hidden when hideClosed is active
+		restoreSelection := false
 		if m.hideClosed {
 			idx := m.findPrevVisibleJob(m.selectedIdx)
 			if idx < 0 {
@@ -115,9 +116,15 @@ func (m model) handleCancelKey() (tea.Model, tea.Cmd) {
 			if idx >= 0 {
 				m.selectedIdx = idx
 				m.updateSelectedJobID()
+			} else {
+				m.selectedIdx = -1
+				m.selectedJobID = 0
 			}
+			restoreSelection = true
 		}
-		return m, m.cancelJob(job.ID, oldStatus, oldFinishedAt)
+		return m, m.cancelJob(
+			job.ID, oldStatus, oldFinishedAt, restoreSelection,
+		)
 	}
 	return m, nil
 }
@@ -128,15 +135,22 @@ func (m model) handleRerunKey() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if job.Status == storage.JobStatusDone || job.Status == storage.JobStatusFailed || job.Status == storage.JobStatusCanceled {
-		oldStatus := job.Status
-		oldStartedAt := job.StartedAt
-		oldFinishedAt := job.FinishedAt
-		oldError := job.Error
+		snap := rerunSnapshot{
+			jobID:         job.ID,
+			oldStatus:     job.Status,
+			oldStartedAt:  job.StartedAt,
+			oldFinishedAt: job.FinishedAt,
+			oldError:      job.Error,
+			oldClosed:     job.Closed,
+			oldVerdict:    job.Verdict,
+		}
 		job.Status = storage.JobStatusQueued
 		job.StartedAt = nil
 		job.FinishedAt = nil
 		job.Error = ""
-		return m, m.rerunJob(job.ID, oldStatus, oldStartedAt, oldFinishedAt, oldError)
+		job.Closed = nil
+		job.Verdict = nil
+		return m, m.rerunJob(snap)
 	}
 	return m, nil
 }
