@@ -43,8 +43,9 @@ Examples:
 				return fmt.Errorf("daemon not running: %w", err)
 			}
 
-			addr := getDaemonAddr()
-			client := &http.Client{Timeout: 5 * time.Second}
+			ep := getDaemonEndpoint()
+			addr := ep.BaseURL()
+			client := ep.HTTPClient(5 * time.Second)
 
 			var queryURL string
 			var displayRef string

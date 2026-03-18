@@ -38,6 +38,8 @@ type Server struct {
 	errorLog      *ErrorLog
 	activityLog   *ActivityLog
 	startTime     time.Time
+	endpointMu    sync.Mutex // protects endpoint (written by Start, read by Stop)
+	endpoint      DaemonEndpoint
 
 	// Cached machine ID to avoid INSERT on every status request
 	machineIDMu sync.Mutex
@@ -121,7 +123,9 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 // Start begins the server and worker pool
 func (s *Server) Start(ctx context.Context) error {
 	cfg := s.configWatcher.Config()
-	if err := validateDaemonBindAddr(cfg.ServerAddr); err != nil {
+
+	ep, err := ParseEndpoint(cfg.ServerAddr)
+	if err != nil {
 		return err
 	}
 
@@ -138,7 +142,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Check if a responsive daemon is still running after cleanup
-	if info, err := GetAnyRunningDaemon(); err == nil && IsDaemonAlive(info.Addr) {
+	if info, err := GetAnyRunningDaemon(); err == nil && IsDaemonAlive(info.Endpoint()) {
 		return fmt.Errorf("daemon already running (pid %d on %s)", info.PID, info.Addr)
 	}
 
@@ -153,29 +157,61 @@ func (s *Server) Start(ctx context.Context) error {
 		// Continue without hot-reloading - not a fatal error
 	}
 
-	// Find available port
-	addr, port, err := FindAvailablePort(cfg.ServerAddr)
-	if err != nil {
-		s.configWatcher.Stop()
-		return fmt.Errorf("find available port: %w", err)
-	}
-	s.httpServer.Addr = addr
-
 	// Bind the listener before publishing runtime metadata so concurrent CLI
 	// invocations cannot race a half-started daemon and kill it as a zombie.
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		s.configWatcher.Stop()
-		return fmt.Errorf("listen on %s: %w", addr, err)
+	var listener net.Listener
+	if ep.IsUnix() {
+		socketPath := ep.Address
+		socketDir := filepath.Dir(socketPath)
+		if err := os.MkdirAll(socketDir, 0700); err != nil {
+			s.configWatcher.Stop()
+			return fmt.Errorf("create socket directory: %w", err)
+		}
+		// Verify the parent directory has safe permissions (owner-only)
+		if fi, err := os.Stat(socketDir); err == nil {
+			if perm := fi.Mode().Perm(); perm&0077 != 0 {
+				s.configWatcher.Stop()
+				return fmt.Errorf("socket directory %s has unsafe permissions %o (must not be group/world accessible)", socketDir, perm)
+			}
+		}
+		// Remove stale socket from a previous run
+		os.Remove(socketPath)
+		listener, err = ep.Listener()
+		if err != nil {
+			s.configWatcher.Stop()
+			return fmt.Errorf("listen on %s: %w", ep, err)
+		}
+		if err := os.Chmod(socketPath, 0600); err != nil {
+			_ = listener.Close()
+			s.configWatcher.Stop()
+			return fmt.Errorf("chmod socket: %w", err)
+		}
+	} else {
+		// TCP: find an available port first
+		addr, _, err := FindAvailablePort(ep.Address)
+		if err != nil {
+			s.configWatcher.Stop()
+			return fmt.Errorf("find available port: %w", err)
+		}
+		ep = DaemonEndpoint{Network: "tcp", Address: addr}
+		s.httpServer.Addr = addr
+
+		listener, err = ep.Listener()
+		if err != nil {
+			s.configWatcher.Stop()
+			return fmt.Errorf("listen on %s: %w", ep, err)
+		}
+		// Update ep with actual bound address
+		ep = DaemonEndpoint{Network: "tcp", Address: listener.Addr().String()}
+		s.httpServer.Addr = ep.Address
 	}
-	addr = listener.Addr().String()
-	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
-		port = tcpAddr.Port
-	}
-	s.httpServer.Addr = addr
+
+	s.endpointMu.Lock()
+	s.endpoint = ep
+	s.endpointMu.Unlock()
 
 	serveErrCh := make(chan error, 1)
-	log.Printf("Starting HTTP server on %s", addr)
+	log.Printf("Starting HTTP server on %s", ep)
 	go func() {
 		serveErrCh <- s.httpServer.Serve(listener)
 	}()
@@ -183,7 +219,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Start worker pool before advertising availability.
 	s.workerPool.Start()
 
-	ready, serveExited, err := waitForServerReady(ctx, addr, 2*time.Second, serveErrCh)
+	ready, serveExited, err := waitForServerReady(ctx, ep, 2*time.Second, serveErrCh)
 	if err != nil {
 		_ = listener.Close()
 		s.configWatcher.Stop()
@@ -200,7 +236,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Write runtime info only after the HTTP server is accepting requests.
-	if err := WriteRuntime(addr, port, version.Version); err != nil {
+	if err := WriteRuntime(ep, version.Version); err != nil {
 		log.Printf("Warning: failed to write runtime info: %v", err)
 	}
 
@@ -209,11 +245,11 @@ func (s *Server) Start(ctx context.Context) error {
 		binary, _ := os.Executable()
 		s.activityLog.Log(
 			"daemon.started", "server",
-			fmt.Sprintf("daemon started on %s", addr),
+			fmt.Sprintf("daemon started on %s", ep),
 			map[string]string{
 				"version": version.Version,
 				"binary":  binary,
-				"addr":    addr,
+				"addr":    ep.Address,
 				"pid":     strconv.Itoa(os.Getpid()),
 				"workers": strconv.Itoa(cfg.MaxWorkers),
 			},
@@ -236,7 +272,7 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func waitForServerReady(ctx context.Context, addr string, timeout time.Duration, serveErrCh <-chan error) (bool, bool, error) {
+func waitForServerReady(ctx context.Context, ep DaemonEndpoint, timeout time.Duration, serveErrCh <-chan error) (bool, bool, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 
@@ -255,7 +291,7 @@ func waitForServerReady(ctx context.Context, addr string, timeout time.Duration,
 			return false, true, err
 		default:
 		}
-		if _, err := ProbeDaemon(addr, 200*time.Millisecond); err == nil {
+		if _, err := ProbeDaemon(ep, 200*time.Millisecond); err == nil {
 			return true, false, nil
 		} else {
 			lastErr = err
@@ -280,7 +316,7 @@ func waitForServerReady(ctx context.Context, addr string, timeout time.Duration,
 	if lastErr == nil {
 		lastErr = fmt.Errorf("server did not respond before timeout")
 	}
-	return false, false, fmt.Errorf("daemon failed to become ready on %s within %s: %w", addr, timeout, lastErr)
+	return false, false, fmt.Errorf("daemon failed to become ready on %s within %s: %w", ep, timeout, lastErr)
 }
 
 func awaitServeExitOnUnreadyStartup(serveExited bool, serveErrCh <-chan error) error {
@@ -330,6 +366,14 @@ func (s *Server) Stop() error {
 	// Stop HTTP server
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Clean up Unix domain socket
+	s.endpointMu.Lock()
+	ep := s.endpoint
+	s.endpointMu.Unlock()
+	if ep.IsUnix() {
+		os.Remove(ep.Address)
 	}
 
 	// Stop CI poller

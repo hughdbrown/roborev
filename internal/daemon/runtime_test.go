@@ -162,7 +162,7 @@ func TestRuntimeInfoReadWrite(t *testing.T) {
 
 	t.Run("WriteAndRead", func(t *testing.T) {
 		// Write runtime info
-		err := WriteRuntime(defaultTestAddr, defaultTestPort, "test-version")
+		err := WriteRuntime(DaemonEndpoint{Network: "tcp", Address: defaultTestAddr}, "test-version")
 		if err != nil {
 			require.Condition(t, func() bool {
 				return false
@@ -401,7 +401,7 @@ func TestProbeDaemonPrefersPing(t *testing.T) {
 		})
 	})
 
-	info, err := ProbeDaemon(addr, time.Second)
+	info, err := ProbeDaemon(DaemonEndpoint{Network: "tcp", Address: addr}, time.Second)
 	if err != nil {
 		require.Condition(t, func() bool {
 			return false
@@ -428,7 +428,7 @@ func TestProbeDaemonFallsBackToLegacyStatus(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "v-legacy"})
 	})
 
-	info, err := ProbeDaemon(addr, time.Second)
+	info, err := ProbeDaemon(DaemonEndpoint{Network: "tcp", Address: addr}, time.Second)
 	if err != nil {
 		require.Condition(t, func() bool {
 			return false
@@ -482,7 +482,7 @@ func TestIsDaemonAliveLegacyStatusCodes(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]string{"version": "v-legacy"})
 				}
 			})
-			got := IsDaemonAlive(addr)
+			got := IsDaemonAlive(DaemonEndpoint{Network: "tcp", Address: addr})
 			if got != tt.wantAlive {
 				assert.Condition(t, func() bool {
 					return false
@@ -490,6 +490,38 @@ func TestIsDaemonAliveLegacyStatusCodes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRuntimeInfo_Endpoint(t *testing.T) {
+	assert := assert.New(t)
+
+	// TCP with explicit network
+	info := RuntimeInfo{PID: 1, Addr: "127.0.0.1:7373", Port: 7373, Network: "tcp"}
+	ep := info.Endpoint()
+	assert.Equal("tcp", ep.Network)
+	assert.Equal("127.0.0.1:7373", ep.Address)
+
+	// Unix
+	info = RuntimeInfo{PID: 1, Addr: "/tmp/test.sock", Port: 0, Network: "unix"}
+	ep = info.Endpoint()
+	assert.Equal("unix", ep.Network)
+	assert.Equal("/tmp/test.sock", ep.Address)
+
+	// Empty network defaults to TCP (backwards compat)
+	info = RuntimeInfo{PID: 1, Addr: "127.0.0.1:7373", Port: 7373, Network: ""}
+	ep = info.Endpoint()
+	assert.Equal("tcp", ep.Network)
+}
+
+func TestRuntimeInfo_BackwardsCompat_NoNetworkField(t *testing.T) {
+	// Simulate old JSON without "network" field
+	data := []byte(`{"pid": 1234, "addr": "127.0.0.1:7373", "port": 7373, "version": "0.47.0"}`)
+	var info RuntimeInfo
+	require.NoError(t, json.Unmarshal(data, &info))
+	assert.Empty(t, info.Network)
+	ep := info.Endpoint()
+	assert.Equal(t, "tcp", ep.Network)
+	assert.Equal(t, "127.0.0.1:7373", ep.Address)
 }
 
 func TestListAllRuntimesWithGlobMetacharacters(t *testing.T) {

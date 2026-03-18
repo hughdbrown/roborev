@@ -183,13 +183,14 @@ func fetchJobBatch(ctx context.Context, ids []int64) (map[int64]storage.JobWithR
 		return nil, fmt.Errorf("marshal batch request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", serverAddr+"/api/jobs/batch", bytes.NewReader(reqBody))
+	ep := getDaemonEndpoint()
+	req, err := http.NewRequestWithContext(ctx, "POST", ep.BaseURL()+"/api/jobs/batch", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("create batch request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := ep.HTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("batch fetch: %w", err)
@@ -285,7 +286,7 @@ func waitForConsolidation(ctx context.Context, cmd *cobra.Command, jobID int64, 
 		output = cmd.OutOrStdout()
 	}
 
-	_, err := waitForJobCompletion(ctx, serverAddr, jobID, output)
+	_, err := waitForJobCompletion(ctx, getDaemonEndpoint().BaseURL(), jobID, output)
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
@@ -400,7 +401,7 @@ func runCompact(cmd *cobra.Command, opts compactOptions) error {
 	// CRITICAL: This must succeed or source jobs will never be closed
 	if err := writeCompactMetadata(consolidatedJobID, successfulJobIDs); err != nil {
 		// Try to cancel the job we just created
-		if cancelErr := cancelJob(serverAddr, consolidatedJobID); cancelErr != nil {
+		if cancelErr := cancelJob(getDaemonEndpoint().BaseURL(), consolidatedJobID); cancelErr != nil {
 			// Best effort - log but don't mask the original error
 			log.Printf("Failed to cancel job %d after metadata write failure: %v", consolidatedJobID, cancelErr)
 		}
@@ -550,7 +551,8 @@ func enqueueCompactJob(repoRoot, prompt, outputPrefix, label, branch string, opt
 		return nil, fmt.Errorf("marshal enqueue request: %w", err)
 	}
 
-	resp, err := http.Post(serverAddr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))
+	ep := getDaemonEndpoint()
+	resp, err := ep.HTTPClient(10*time.Second).Post(ep.BaseURL()+"/api/enqueue", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -607,7 +609,7 @@ func cancelJob(serverAddr string, jobID int64) error {
 	if err != nil {
 		return fmt.Errorf("marshal cancel request: %w", err)
 	}
-	resp, err := http.Post(serverAddr+"/api/job/cancel", "application/json", bytes.NewReader(reqBody))
+	resp, err := getDaemonHTTPClient(10*time.Second).Post(serverAddr+"/api/job/cancel", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}
