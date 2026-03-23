@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // normalizeMSYSPath converts MSYS-style paths (e.g., /c/Users/...) to Windows paths (C:\Users\...).
@@ -105,9 +107,7 @@ func GetDiff(
 	repoPath, sha string, extraExcludes ...string,
 ) (string, error) {
 	args := []string{"show", sha, "--format=", "--"}
-	args = append(args, ".")
-	args = append(args, excludedPathPatterns...)
-	args = append(args, formatExcludeArgs(extraExcludes)...)
+	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
 
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoPath
@@ -120,8 +120,20 @@ func GetDiff(
 	return string(out), nil
 }
 
+// GetDiffLimited returns up to maxBytes of a commit diff and reports whether the
+// output was truncated before the full diff was read.
+func GetDiffLimited(
+	repoPath, sha string, maxBytes int, extraExcludes ...string,
+) (string, bool, error) {
+	args := []string{"show", sha, "--format=", "--"}
+	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
+	return captureGitOutputLimited(repoPath, maxBytes, args...)
+}
+
 // GetFilesChanged returns the list of files changed in a commit
-func GetFilesChanged(repoPath, sha string) ([]string, error) {
+func GetFilesChanged(
+	repoPath, sha string,
+) ([]string, error) {
 	cmd := exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
 	cmd.Dir = repoPath
 
@@ -368,9 +380,7 @@ func GetRangeDiff(
 	repoPath, rangeRef string, extraExcludes ...string,
 ) (string, error) {
 	args := []string{"diff", rangeRef, "--"}
-	args = append(args, ".")
-	args = append(args, excludedPathPatterns...)
-	args = append(args, formatExcludeArgs(extraExcludes)...)
+	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
 
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoPath
@@ -381,6 +391,16 @@ func GetRangeDiff(
 	}
 
 	return string(out), nil
+}
+
+// GetRangeDiffLimited returns up to maxBytes of a range diff and reports
+// whether the output was truncated before the full diff was read.
+func GetRangeDiffLimited(
+	repoPath, rangeRef string, maxBytes int, extraExcludes ...string,
+) (string, bool, error) {
+	args := []string{"diff", rangeRef, "--"}
+	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
+	return captureGitOutputLimited(repoPath, maxBytes, args...)
 }
 
 // HasUncommittedChanges returns true if there are uncommitted changes (staged, unstaged, or untracked files)
@@ -411,7 +431,7 @@ func GetDirtyDiff(
 ) (string, error) {
 	var result strings.Builder
 
-	extra := formatExcludeArgs(extraExcludes)
+	extra := FormatExcludeArgs(extraExcludes)
 
 	// Build diff args with exclusions
 	diffArgs := func(baseArgs ...string) []string {
@@ -569,13 +589,15 @@ var excludedPathPatterns = []string{
 	":(exclude,glob)**/.cache/**",
 }
 
-// formatExcludeArgs converts user-provided exclude patterns (filenames
+// FormatExcludeArgs converts user-provided exclude patterns (filenames
 // or globs) into git pathspec arguments. Plain names without path
 // separators get both **/name (file match) and **/name/** (directory
 // subtree) so they work whether the name is a file or directory.
 // Leading-slash patterns (/vendor) are root-anchored — no **/
 // prefix. Patterns containing "/" are passed through as-is.
-func formatExcludeArgs(patterns []string) []string {
+// FormatExcludeArgs converts user-provided exclude patterns into git
+// pathspec arguments suitable for appending after "--".
+func FormatExcludeArgs(patterns []string) []string {
 	if len(patterns) == 0 {
 		return nil
 	}
@@ -610,6 +632,105 @@ func formatExcludeArgs(patterns []string) []string {
 	return args
 }
 
+// ReviewPathspecArgs returns the git pathspec arguments roborev uses for review
+// diffs: the repo root plus built-in and configured exclusions.
+func ReviewPathspecArgs(extraExcludes ...string) []string {
+	args := []string{"."}
+	args = append(args, excludedPathPatterns...)
+	args = append(args, FormatExcludeArgs(extraExcludes)...)
+	return args
+}
+
+func captureGitOutputLimited(repoPath string, maxBytes int, args ...string) (string, bool, error) {
+	if maxBytes <= 0 {
+		return "", true, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repoPath
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", false, fmt.Errorf("create git stdout pipe: %w", err)
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return "", false, fmt.Errorf("start git command: %w", err)
+	}
+
+	var out bytes.Buffer
+	buf := make([]byte, 32*1024)
+	truncated := false
+
+	for {
+		n, readErr := stdout.Read(buf)
+		if n > 0 {
+			remaining := maxBytes - out.Len()
+			if remaining <= 0 {
+				truncated = true
+				cancel()
+				break
+			}
+			if n > remaining {
+				out.Write(buf[:remaining])
+				truncated = true
+				cancel()
+				break
+			}
+			out.Write(buf[:n])
+		}
+
+		if readErr == nil {
+			continue
+		}
+		if readErr == io.EOF {
+			break
+		}
+		cancel()
+		_ = cmd.Wait()
+		return "", false, fmt.Errorf("read git output: %w", readErr)
+	}
+
+	// Drain remaining stdout so the process can exit cleanly.
+	// On Windows, a killed process may still block if its stdout
+	// pipe buffer is full and no reader is consuming it, which
+	// prevents Wait from returning.
+	if truncated {
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+
+	waitErr := cmd.Wait()
+	if truncated {
+		result := out.Bytes()
+		// Trim at most 3 trailing bytes that form an incomplete
+		// UTF-8 rune left by the byte-boundary truncation. Interior
+		// invalid bytes are preserved and get FFFD replacement below.
+		for i := 0; i < utf8.UTFMax-1 && len(result) > 0; i++ {
+			r, size := utf8.DecodeLastRune(result)
+			if r != utf8.RuneError || size != 1 {
+				break
+			}
+			result = result[:len(result)-1]
+		}
+		return sanitizeToValidUTF8(result), true, nil
+	}
+	if waitErr != nil {
+		return "", false, fmt.Errorf("git command failed: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+
+	return out.String(), false, nil
+}
+
+func sanitizeToValidUTF8(b []byte) string {
+	return string(bytes.ToValidUTF8(b, []byte("\uFFFD")))
+}
+
 // isBinaryContent checks if content appears to be binary (contains null bytes in first 8KB)
 func isBinaryContent(content []byte) bool {
 	// Check first 8KB for null bytes
@@ -622,8 +743,10 @@ func isBinaryContent(content []byte) bool {
 	return false
 }
 
-// GetRangeFilesChanged returns the list of files changed in a range (e.g. "mergeBase..HEAD")
-func GetRangeFilesChanged(repoPath, rangeRef string) ([]string, error) {
+// GetRangeFilesChanged returns the list of files changed in a range (e.g. "mergeBase..HEAD").
+func GetRangeFilesChanged(
+	repoPath, rangeRef string,
+) ([]string, error) {
 	cmd := exec.Command("git", "diff", "--name-only", rangeRef)
 	cmd.Dir = repoPath
 

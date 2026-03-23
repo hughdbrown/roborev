@@ -97,6 +97,238 @@ func setupTestRepo(t *testing.T) (string, []string) {
 	return r.dir, commits
 }
 
+func setupLargeDiffRepo(t *testing.T) (string, string) {
+	t.Helper()
+	r := newTestRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	var content strings.Builder
+	for range 20000 {
+		content.WriteString("line ")
+		content.WriteString(strings.Repeat("x", 20))
+		content.WriteString(" ")
+		content.WriteString(strings.Repeat("y", 20))
+		content.WriteString("\n")
+	}
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "large.txt"),
+		[]byte(content.String()), 0o644,
+	))
+	r.git("add", "large.txt")
+	r.git("commit", "-m", "large change")
+
+	return r.dir, r.git("rev-parse", "HEAD")
+}
+
+func setupLargeDiffRepoWithGuidelines(t *testing.T, guidelineLen int) (string, string) {
+	t.Helper()
+	r := newTestRepoWithBranch(t, "main")
+
+	guidelines := strings.Repeat("g", guidelineLen)
+	toml := `review_guidelines = """` + "\n" + guidelines + "\n" + `"""` + "\n"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, ".roborev.toml"),
+		[]byte(toml), 0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", ".roborev.toml", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	r.git("remote", "add", "origin", r.dir)
+	r.git("fetch", "origin")
+	r.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	var content strings.Builder
+	for range 20000 {
+		content.WriteString("line ")
+		content.WriteString(strings.Repeat("x", 20))
+		content.WriteString(" ")
+		content.WriteString(strings.Repeat("y", 20))
+		content.WriteString("\n")
+	}
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "large.txt"),
+		[]byte(content.String()), 0o644,
+	))
+	r.git("add", "large.txt")
+	r.git("commit", "-m", "large change")
+
+	return r.dir, r.git("rev-parse", "HEAD")
+}
+
+func setupLargeCommitBodyRepo(t *testing.T, bodyLen int) (string, string) {
+	t.Helper()
+	r := newTestRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\nnext\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+
+	msgPath := filepath.Join(r.dir, "commit-message.txt")
+	body := strings.Repeat("body line\n", max(1, bodyLen/len("body line\n")))
+	message := "large change\n\n" + body
+	require.NoError(t, os.WriteFile(msgPath, []byte(message), 0o644))
+	r.git("commit", "-F", msgPath)
+
+	return r.dir, r.git("rev-parse", "HEAD")
+}
+
+func commitWithRepoConfig(t *testing.T, repoDir, messageFile string) {
+	t.Helper()
+	cmd := exec.Command("git", "commit", "-F", messageFile)
+	cmd.Dir = repoDir
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_AUTHOR_") || strings.HasPrefix(kv, "GIT_COMMITTER_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git commit with repo config failed\n%s", out)
+}
+
+func setConfiguredUserName(t *testing.T, repoDir, authorName string) {
+	t.Helper()
+	configPath := filepath.Join(repoDir, ".git", "config")
+	configBytes, err := os.ReadFile(configPath)
+	require.NoError(t, err, "read git config: %v", err)
+
+	updated := strings.Replace(string(configBytes), "name = "+testGitUser, "name = "+authorName, 1)
+	require.NotEqual(t, string(configBytes), updated, "expected to replace the configured git user name")
+	require.NoError(t, os.WriteFile(configPath, []byte(updated), 0o644), "write git config: %v", err)
+}
+
+func setupLargeCommitSubjectRepo(t *testing.T, subjectLen int) (string, string) {
+	t.Helper()
+	r := newTestRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\nnext\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+
+	msgPath := filepath.Join(r.dir, "commit-message.txt")
+	message := strings.Repeat("s", subjectLen) + "\n"
+	require.NoError(t, os.WriteFile(msgPath, []byte(message), 0o644))
+	r.git("commit", "-F", msgPath)
+
+	return r.dir, r.git("rev-parse", "HEAD")
+}
+
+func setupLargeCommitAuthorRepo(t *testing.T, authorLen int) (string, string) {
+	t.Helper()
+	r := newTestRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\nnext\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+
+	msgPath := filepath.Join(r.dir, "commit-message.txt")
+	require.NoError(t, os.WriteFile(msgPath, []byte("large change\n"), 0o644))
+	setConfiguredUserName(t, r.dir, strings.Repeat("a", authorLen))
+	commitWithRepoConfig(t, r.dir, msgPath)
+
+	return r.dir, r.git("rev-parse", "HEAD")
+}
+
+func setupLargeRangeMetadataRepo(t *testing.T, commitCount, subjectLen int) (string, string) {
+	t.Helper()
+	r := newTestRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	startSHA := r.git("rev-parse", "HEAD")
+	subject := strings.Repeat("s", subjectLen)
+	for i := range commitCount {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(r.dir, "base.txt"),
+			[]byte(strings.Repeat("x\n", i+2)), 0o644,
+		))
+		r.git("add", "base.txt")
+		r.git("commit", "-m", subject)
+	}
+
+	endSHA := r.git("rev-parse", "HEAD")
+	return r.dir, startSHA + ".." + endSHA
+}
+
+func setupLargeExcludePatternRepo(t *testing.T) (string, string) {
+	t.Helper()
+	r := newTestRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "base.txt"),
+		[]byte("base\n"), 0o644,
+	))
+	r.git("add", "base.txt")
+	r.git("commit", "-m", "initial")
+
+	var keep strings.Builder
+	for range 12000 {
+		keep.WriteString("package main\n")
+	}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "keep.go"),
+		[]byte(keep.String()), 0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "custom.dat"),
+		[]byte(strings.Repeat("generated\n", 2048)), 0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(r.dir, "go.sum"),
+		[]byte(strings.Repeat("sum\n", 1024)), 0o644,
+	))
+	r.git("add", "keep.go", "custom.dat", "go.sum")
+	r.git("commit", "-m", "large change")
+
+	return r.dir, r.git("rev-parse", "HEAD")
+}
+
 func setupDBWithCommits(t *testing.T, repoPath string, commits []string) (*storage.DB, int64) {
 	t.Helper()
 	db := testutil.OpenTestDB(t)

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/roborev-dev/roborev/internal/testenv"
 	"github.com/stretchr/testify/assert"
@@ -756,8 +757,8 @@ func TestGetDirtyDiffStagedThenDeleted(t *testing.T) {
 }
 
 func TestFormatExcludeArgs(t *testing.T) {
-	assert.Nil(t, formatExcludeArgs(nil))
-	assert.Nil(t, formatExcludeArgs([]string{}))
+	assert.Nil(t, FormatExcludeArgs(nil))
+	assert.Nil(t, FormatExcludeArgs([]string{}))
 
 	// Plain names get both file and directory forms
 	assert.Equal(t,
@@ -767,7 +768,7 @@ func TestFormatExcludeArgs(t *testing.T) {
 			":(exclude,glob)**/*.min.js",
 			":(exclude,glob)**/*.min.js/**",
 		},
-		formatExcludeArgs([]string{"foo.lock", "*.min.js"}),
+		FormatExcludeArgs([]string{"foo.lock", "*.min.js"}),
 	)
 
 	// Patterns with path separators get both exact and subtree forms
@@ -776,7 +777,7 @@ func TestFormatExcludeArgs(t *testing.T) {
 			":(exclude,glob)vendor/dist",
 			":(exclude,glob)vendor/dist/**",
 		},
-		formatExcludeArgs([]string{"vendor/dist"}),
+		FormatExcludeArgs([]string{"vendor/dist"}),
 	)
 
 	// Whitespace-only patterns are skipped
@@ -785,7 +786,7 @@ func TestFormatExcludeArgs(t *testing.T) {
 			":(exclude,glob)**/keep",
 			":(exclude,glob)**/keep/**",
 		},
-		formatExcludeArgs([]string{" ", "keep", "  "}),
+		FormatExcludeArgs([]string{" ", "keep", "  "}),
 	)
 
 	// Leading slash = root-anchored (no **/ prefix)
@@ -794,7 +795,7 @@ func TestFormatExcludeArgs(t *testing.T) {
 			":(exclude,glob)vendor",
 			":(exclude,glob)vendor/**",
 		},
-		formatExcludeArgs([]string{"/vendor"}),
+		FormatExcludeArgs([]string{"/vendor"}),
 	)
 }
 
@@ -898,6 +899,97 @@ func TestGetDiffExcludesSlashedDirectory(t *testing.T) {
 		assert.NotContains(t, diff, "util.js",
 			"slashed exclude should filter nested tracked files")
 	})
+}
+
+func TestGetDiffLimited(t *testing.T) {
+	repo := NewTestRepoWithCommit(t)
+	repo.WriteFile("large.txt", strings.Repeat("line\n", 20000))
+	repo.CommitAll("large change")
+
+	diff, truncated, err := GetDiffLimited(repo.Dir, repo.HeadSHA(), 1024)
+	require.NoError(t, err)
+	assert.True(t, truncated, "expected limited diff read to report truncation")
+	assert.LessOrEqual(t, len(diff), 1024)
+}
+
+func TestGetRangeDiffLimited(t *testing.T) {
+	repo := NewTestRepoWithCommit(t)
+	repo.WriteFile("large.txt", strings.Repeat("line\n", 20000))
+	repo.CommitAll("large change")
+
+	diff, truncated, err := GetRangeDiffLimited(repo.Dir, "HEAD~1..HEAD", 1024)
+	require.NoError(t, err)
+	assert.True(t, truncated, "expected limited range diff read to report truncation")
+	assert.LessOrEqual(t, len(diff), 1024)
+}
+
+func TestGetDiffLimitedTruncatesUTF8Safely(t *testing.T) {
+	repo := NewTestRepoWithCommit(t)
+	repo.WriteFile("large.txt", strings.Repeat("世界\n", 20000))
+	repo.CommitAll("large unicode change")
+
+	fullDiff, err := GetDiff(repo.Dir, repo.HeadSHA())
+	require.NoError(t, err)
+
+	splitAt := -1
+	for i := 0; i < len(fullDiff); i++ {
+		if fullDiff[i] >= utf8.RuneSelf {
+			splitAt = i + 1
+			break
+		}
+	}
+	require.Positive(t, splitAt, "expected diff to contain multibyte UTF-8 content")
+
+	diff, truncated, err := GetDiffLimited(repo.Dir, repo.HeadSHA(), splitAt)
+	require.NoError(t, err)
+	assert.True(t, truncated, "expected limited diff read to report truncation")
+	assert.LessOrEqual(t, len(diff), splitAt)
+	assert.True(t, utf8.ValidString(diff), "limited diff output should remain valid UTF-8")
+}
+
+func TestGetDiffLimitedPreservesPrefixWithEarlierInvalidBytes(t *testing.T) {
+	repo := NewTestRepoWithCommit(t)
+	path := filepath.Join(repo.Dir, "legacy.txt")
+	content := append([]byte("latin1: \xe9\n"), []byte(strings.Repeat("世界\n", 20000))...)
+	err := os.WriteFile(path, content, 0o644)
+	require.NoError(t, err)
+	repo.Run("add", "legacy.txt")
+	repo.Run("commit", "-m", "large legacy-encoded change")
+
+	fullDiff, err := GetDiff(repo.Dir, repo.HeadSHA())
+	require.NoError(t, err)
+
+	diffBytes := []byte(fullDiff)
+	invalidIdx := strings.Index(fullDiff, "\xe9")
+	require.Positive(t, invalidIdx, "expected diff to contain earlier invalid UTF-8 bytes")
+
+	splitAt := -1
+	for i := invalidIdx + 1; i < len(diffBytes); i++ {
+		if diffBytes[i] >= utf8.RuneSelf && utf8.RuneStart(diffBytes[i]) {
+			splitAt = i + 1
+			break
+		}
+	}
+	require.Positive(t, splitAt, "expected diff to contain multibyte UTF-8 content after invalid bytes")
+
+	diff, truncated, err := GetDiffLimited(repo.Dir, repo.HeadSHA(), splitAt)
+	require.NoError(t, err)
+	assert.True(t, truncated, "expected limited diff read to report truncation")
+	assert.True(t, utf8.ValidString(diff), "limited diff output should remain valid UTF-8")
+	assert.Contains(t, diff, "latin1:", "sanitized limited diff should preserve the earlier valid prefix")
+	assert.NotEmpty(t, diff, "sanitized limited diff should not collapse to an empty string")
+}
+
+func TestSanitizeToValidUTF8PreservesEarlierBytesWhileRepairingTail(t *testing.T) {
+	input := []byte("latin1: \xe9\nunicode: ")
+	input = append(input, []byte("世界")...)
+	input = input[:len(input)-1] // split the final multibyte rune
+
+	output := sanitizeToValidUTF8(input)
+
+	assert.True(t, utf8.ValidString(output), "sanitized output should be valid UTF-8")
+	assert.Contains(t, output, "latin1:", "sanitized output should preserve the earlier valid prefix")
+	assert.NotEmpty(t, output, "sanitized output should not collapse to an empty string")
 }
 
 func TestGetDirtyDiffExcludesUntrackedFiles(t *testing.T) {
