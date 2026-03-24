@@ -42,3 +42,7 @@ REPORT.md
 # Claude Code
 .claude/worktrees/
 .claude/settings.local.json
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
