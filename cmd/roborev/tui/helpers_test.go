@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/mattn/go-runewidth"
+	"github.com/muesli/termenv"
 	"github.com/roborev-dev/roborev/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +24,7 @@ func stripTestANSI(s string) string {
 
 func TestRenderMarkdownLinesPreservesNewlines(t *testing.T) {
 	// Verify that single newlines in plain text are preserved (not collapsed into one paragraph)
-	lines := renderMarkdownLines("Line 1\nLine 2\nLine 3", 80, 80, styles.DarkStyleConfig, 2)
+	lines := renderMarkdownLines("Line 1\nLine 2\nLine 3", 80, 80, styles.DarkStyleConfig, 2, termenv.TrueColor)
 
 	found := 0
 	for _, line := range lines {
@@ -36,7 +37,7 @@ func TestRenderMarkdownLinesPreservesNewlines(t *testing.T) {
 }
 
 func TestRenderMarkdownLinesFallsBackOnEmpty(t *testing.T) {
-	lines := renderMarkdownLines("", 80, 80, styles.DarkStyleConfig, 2)
+	lines := renderMarkdownLines("", 80, 80, styles.DarkStyleConfig, 2, termenv.TrueColor)
 	// Should not panic and should produce some output (even if empty)
 	assert.NotNil(t, lines)
 }
@@ -304,7 +305,7 @@ func TestRenderMarkdownLinesPreservesLongProse(t *testing.T) {
 	// Long prose lines should be word-wrapped by glamour, not truncated.
 	// All words must appear in the rendered output.
 	longProse := "This is a very long prose line with important content that should be word-wrapped by glamour rather than truncated so that no information is lost from the rendered output"
-	lines := renderMarkdownLines(longProse, 60, 80, styles.DarkStyleConfig, 2)
+	lines := renderMarkdownLines(longProse, 60, 80, styles.DarkStyleConfig, 2, termenv.TrueColor)
 
 	var combined strings.Builder
 	for _, line := range lines {
@@ -423,7 +424,7 @@ func TestRenderMarkdownLinesNoOverflow(t *testing.T) {
 	longLine := strings.Repeat("x", 200)
 	text := "Review:\n\n```\n" + longLine + "\n```\n"
 	width := 76
-	lines := renderMarkdownLines(text, width, width, styles.DarkStyleConfig, 2)
+	lines := renderMarkdownLines(text, width, width, styles.DarkStyleConfig, 2, termenv.TrueColor)
 
 	for i, line := range lines {
 		stripped := stripTestANSI(line)
@@ -431,6 +432,19 @@ func TestRenderMarkdownLinesNoOverflow(t *testing.T) {
 			assert.LessOrEqual(t, len(stripped), width+10, "line %d exceeds width %d: len=%d %q", i, width, len(stripped), stripped)
 		}
 	}
+}
+
+func TestRenderMarkdownLinesNoColor(t *testing.T) {
+	// When colorProfile is Ascii, stripTrailingPadding removes all SGR
+	// sequences (colors, bold, underline, reset) so no formatting can
+	// bleed across lines.
+	text := "# Heading\n\nSome **bold** text and `code`."
+	lines := renderMarkdownLines(text, 80, 80, styles.DarkStyleConfig, 2, termenv.Ascii)
+
+	combined := strings.Join(lines, "\n")
+	allSGR := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	matches := allSGR.FindAllString(combined, -1)
+	assert.Empty(t, matches, "expected no SGR sequences with Ascii profile, got: %v", matches)
 }
 
 func TestReflowHelpRows(t *testing.T) {
@@ -908,6 +922,69 @@ func TestWrapLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := wrapLine(tt.line, tt.width)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestStripTrailingPadding(t *testing.T) {
+	bold := "\x1b[1m"
+	underline := "\x1b[4m"
+	reset := "\x1b[0m"
+	red := "\x1b[31m"
+
+	tests := []struct {
+		name    string
+		line    string
+		noColor bool
+		want    string
+	}{
+		{
+			name:    "color mode appends reset",
+			line:    red + "hello" + reset,
+			noColor: false,
+			want:    red + "hello" + reset,
+		},
+		{
+			name:    "color mode strips trailing padding",
+			line:    red + "hello" + reset + "   " + reset,
+			noColor: false,
+			want:    red + "hello" + reset,
+		},
+		{
+			name:    "noColor strips mid-line bold",
+			line:    bold + "hello" + reset,
+			noColor: true,
+			want:    "hello",
+		},
+		{
+			name:    "noColor strips mid-line underline",
+			line:    underline + "text" + reset,
+			noColor: true,
+			want:    "text",
+		},
+		{
+			name:    "noColor strips mixed SGR sequences",
+			line:    bold + underline + "mixed" + reset + " plain",
+			noColor: true,
+			want:    "mixed plain",
+		},
+		{
+			name:    "noColor preserves plain text",
+			line:    "no formatting here",
+			noColor: true,
+			want:    "no formatting here",
+		},
+		{
+			name:    "noColor strips trailing padding and all SGR",
+			line:    bold + "word" + reset + "   ",
+			noColor: true,
+			want:    "word",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripTrailingPadding(tt.line, tt.noColor)
 			assert.Equal(t, tt.want, got)
 		})
 	}
