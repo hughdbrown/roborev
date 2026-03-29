@@ -435,7 +435,7 @@ func KillDaemon(info *RuntimeInfo) bool {
 
 // CleanupZombieDaemons finds and kills all unresponsive daemons.
 // Returns the number of zombies cleaned up.
-func CleanupZombieDaemons() int {
+func CleanupZombieDaemons(target DaemonEndpoint) int {
 	runtimes, err := ListAllRuntimes()
 	if err != nil {
 		return 0
@@ -448,7 +448,10 @@ func CleanupZombieDaemons() int {
 		// For Unix sockets, check PID liveness first to avoid slow HTTP probes
 		// against sockets whose owner process is already dead.
 		if ep.IsUnix() && info.PID > 0 && !isProcessAlive(info.PID) {
-			os.Remove(ep.Address)
+			if ep.Address != target.Address {
+				// Clean up non-matching sockets.
+				os.Remove(ep.Address)
+			}
 			if info.SourcePath != "" {
 				os.Remove(info.SourcePath)
 			} else {
@@ -463,8 +466,23 @@ func CleanupZombieDaemons() int {
 			continue
 		}
 
-		// Unresponsive - try to kill it
-		if KillDaemon(info) {
+		// Unresponsive — try to kill it. When the zombie's
+		// socket matches the target (e.g. a systemd-managed
+		// socket we're about to serve on), kill the process
+		// and clean up the runtime file but preserve the socket.
+		if ep.IsUnix() && ep.Address == target.Address {
+			if info.PID > 0 && !killProcess(info.PID) {
+				// Could not confirm kill; leave runtime
+				// metadata so the next attempt can retry.
+				continue
+			}
+			if info.SourcePath != "" {
+				os.Remove(info.SourcePath)
+			} else if info.PID > 0 {
+				RemoveRuntimeForPID(info.PID)
+			}
+			cleaned++
+		} else if KillDaemon(info) {
 			cleaned++
 		}
 	}
