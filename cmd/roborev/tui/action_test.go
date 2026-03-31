@@ -481,6 +481,306 @@ func TestTUIClosedRollbackRestoresSelectionAfterLeavingQueue(t *testing.T) {
 	assertSelection(t, m, 1, 2)
 }
 
+// Regression: closing the last open job from review view, then
+// receiving an SSE-triggered refresh that excludes the closed job,
+// should preserve the anchor so ←/→ navigation and escape-to-queue
+// both land near the bottom — not at the top.
+func TestCloseFromReviewViewRefreshPreservesAnchor(t *testing.T) {
+	assert := assert.New(t)
+
+	// 5 open jobs; user is on the last one (index 4, ID 1).
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(5, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(4, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewReview
+		m.hideClosed = true
+		m.selectedIdx = 4
+		m.selectedJobID = 1
+		m.currentReview = &storage.Review{
+			ID:     10,
+			Closed: false,
+			Job:    &storage.ReviewJob{ID: 1, Status: storage.JobStatusDone},
+		}
+		m.jobStats = storage.JobStats{Done: 5, Closed: 0, Open: 5}
+		m.pendingClosed = make(map[int64]pendingState)
+		m.pendingReviewClosed = make(map[int64]pendingState)
+	})
+
+	// Close the review from review view (press 'a').
+	result, _ := m.handleCloseKey()
+	m = result.(model)
+
+	// Simulate SSE refresh: server returns only open jobs (job 1 filtered
+	// out server-side because closed=false was sent).
+	m, _ = updateModel(t, m, jobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(5, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(4, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		},
+		stats: storage.JobStats{Done: 5, Closed: 1, Open: 4},
+	})
+
+	// Anchor should be preserved (out of bounds) so navigation stays
+	// relative to the closed review's original position.
+	assert.Equal(4, m.selectedIdx,
+		"selectedIdx should be unchanged in review view")
+	assert.Equal(int64(1), m.selectedJobID,
+		"selectedJobID should be unchanged in review view")
+
+	// → (next newer) should navigate to the immediate adjacent review
+	// (Job 2 at index 3), not skip it.
+	nextIdx := m.findNextViewableJob()
+	assert.Equal(3, nextIdx,
+		"next viewable should be Job 2 (adjacent to closed Job 1)")
+	assert.Equal(int64(2), m.jobs[nextIdx].ID)
+
+	// Escape to queue: normalizeSelectionIfHidden should clamp to the
+	// nearest visible job near the bottom.
+	m.currentView = viewQueue
+	m.normalizeSelectionIfHidden()
+	assert.Equal(3, m.selectedIdx,
+		"escape to queue should land near bottom, not top")
+	assert.Equal(int64(2), m.selectedJobID)
+}
+
+// Regression: when a job is removed from the middle of the list while
+// in a review-anchored view, selectedIdx stays in bounds but points to
+// a different job. normalizeSelectionIfHidden must resync selectedJobID.
+func TestNormalizeResyncsStaleJobID(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(5, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(4, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewReview
+		m.hideClosed = true
+		m.selectedIdx = 2
+		m.selectedJobID = 3
+		m.currentReview = &storage.Review{
+			ID:  10,
+			Job: &storage.ReviewJob{ID: 3, Status: storage.JobStatusDone},
+		}
+		m.pendingClosed = make(map[int64]pendingState)
+		m.pendingReviewClosed = make(map[int64]pendingState)
+	})
+
+	// Refresh removes Job 3 from the middle.
+	m, _ = updateModel(t, m, jobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(5, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(4, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		},
+	})
+
+	// Anchor preserved in review view (selectedIdx=2, selectedJobID=3).
+	assert.Equal(2, m.selectedIdx)
+	assert.Equal(int64(3), m.selectedJobID)
+
+	// Escape to queue: selectedIdx=2 is in bounds but points to Job 2.
+	// normalizeSelectionIfHidden must resync selectedJobID.
+	m.currentView = viewQueue
+	m.normalizeSelectionIfHidden()
+	assert.Equal(2, m.selectedIdx)
+	assert.Equal(int64(2), m.selectedJobID,
+		"selectedJobID should be resynced to match jobs[selectedIdx]")
+}
+
+// Regression: prompt view opened from review should preserve the anchor
+// so esc back to review keeps ←/→ navigation correct.
+func TestPromptFromReviewRefreshPreservesAnchor(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewKindPrompt
+		m.promptFromQueue = false // opened from review
+		m.hideClosed = true
+		m.selectedIdx = 2
+		m.selectedJobID = 1
+		m.currentReview = &storage.Review{
+			ID:  10,
+			Job: &storage.ReviewJob{ID: 1, Status: storage.JobStatusDone},
+		}
+	})
+
+	// Refresh removes Job 1.
+	m, _ = updateModel(t, m, jobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		},
+	})
+
+	// Anchor should be preserved (review-rooted prompt).
+	assert.Equal(2, m.selectedIdx,
+		"selectedIdx should be unchanged in prompt-from-review")
+	assert.Equal(int64(1), m.selectedJobID,
+		"selectedJobID should be unchanged in prompt-from-review")
+
+	// → from this position should find the adjacent review (Job 2).
+	nextIdx := m.findNextViewableJob()
+	assert.Equal(1, nextIdx,
+		"next viewable should be Job 2 (adjacent to removed Job 1)")
+}
+
+// Regression: log view opened from a review-rooted context (e.g.,
+// review → prompt → log) should preserve the anchor. logReviewAnchored
+// is set by openLogView based on the calling view's isReviewAnchored().
+func TestLogFromReviewRefreshPreservesAnchor(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewLog
+		m.logFromView = viewQueue // real value from review→prompt→log
+		m.logReviewAnchored = true
+		m.hideClosed = true
+		m.selectedIdx = 2
+		m.selectedJobID = 1
+	})
+
+	// Refresh removes Job 1.
+	m, _ = updateModel(t, m, jobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		},
+	})
+
+	assert.Equal(2, m.selectedIdx,
+		"selectedIdx should be unchanged in log-from-review")
+	assert.Equal(int64(1), m.selectedJobID,
+		"selectedJobID should be unchanged in log-from-review")
+}
+
+// Regression: empty-list refresh in a review-anchored view should
+// preserve selectedJobID so esc back to review doesn't lose context.
+func TestReviewAnchoredEmptyRefreshPreservesJobID(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewKindPrompt
+		m.promptFromQueue = false
+		m.hideClosed = true
+		m.selectedIdx = 0
+		m.selectedJobID = 1
+		m.currentReview = &storage.Review{
+			ID:  10,
+			Job: &storage.ReviewJob{ID: 1, Status: storage.JobStatusDone},
+		}
+	})
+
+	// Refresh returns empty list.
+	m, _ = updateModel(t, m, jobsMsg{jobs: []storage.ReviewJob{}})
+
+	assert.Equal(-1, m.selectedIdx)
+	assert.Equal(int64(1), m.selectedJobID,
+		"selectedJobID should be preserved in review-anchored prompt view")
+}
+
+// Regression: review-anchored log view without currentReview should
+// still preserve selectedJobID on empty-list refresh.
+func TestLogReviewAnchoredEmptyRefreshPreservesJobID(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewLog
+		m.logReviewAnchored = true
+		m.hideClosed = true
+		m.selectedIdx = 0
+		m.selectedJobID = 1
+		// No currentReview — log view doesn't require it.
+	})
+
+	m, _ = updateModel(t, m, jobsMsg{jobs: []storage.ReviewJob{}})
+
+	assert.Equal(-1, m.selectedIdx)
+	assert.Equal(int64(1), m.selectedJobID,
+		"selectedJobID should be preserved in review-anchored log view")
+}
+
+// Regression: prompt view opened from queue should normalize selection
+// when a refresh removes the viewed job, so esc/q doesn't leave stale
+// selectedIdx.
+func TestPromptFromQueueRefreshNormalizesSelection(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewKindPrompt
+		m.promptFromQueue = true
+		m.hideClosed = true
+		m.selectedIdx = 2
+		m.selectedJobID = 1
+	})
+
+	// Refresh removes Job 1 (server-side filter).
+	m, _ = updateModel(t, m, jobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		},
+	})
+
+	// Unlike viewReview, prompt view should clamp selection.
+	assert.True(m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs),
+		"selectedIdx should be in bounds after refresh in prompt view")
+}
+
+// Regression: log view should normalize selection when a refresh removes
+// the viewed job, so esc/q doesn't leave stale selectedIdx.
+func TestLogViewRefreshNormalizesSelection(t *testing.T) {
+	assert := assert.New(t)
+
+	m := setupTestModel([]storage.ReviewJob{
+		makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		makeJob(1, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+	}, func(m *model) {
+		m.currentView = viewLog
+		m.logFromView = viewQueue
+		m.hideClosed = true
+		m.selectedIdx = 2
+		m.selectedJobID = 1
+	})
+
+	// Refresh removes Job 1.
+	m, _ = updateModel(t, m, jobsMsg{
+		jobs: []storage.ReviewJob{
+			makeJob(3, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+			makeJob(2, withStatus(storage.JobStatusDone), withClosed(boolPtr(false))),
+		},
+	})
+
+	assert.True(m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs),
+		"selectedIdx should be in bounds after refresh in log view")
+}
+
 func TestTUISetJobClosedHelper(t *testing.T) {
 	m := newModel(localhostEndpoint, withExternalIODisabled())
 

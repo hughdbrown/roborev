@@ -12,6 +12,22 @@ func (m *model) updateSelectedJobID() {
 	}
 }
 
+// isReviewAnchored reports whether the current view is part of a
+// review-rooted view chain (review, prompt-from-review, log-from-review)
+// where selectedIdx must stay anchored to the displayed review's position.
+func (m model) isReviewAnchored() bool {
+	switch m.currentView {
+	case viewReview:
+		return true
+	case viewKindPrompt:
+		return !m.promptFromQueue
+	case viewLog:
+		return m.logReviewAnchored
+	default:
+		return false
+	}
+}
+
 // findPrevViewableJob finds the previous (older, lower ID) viewable job.
 // Respects active filters. Returns the index or -1 if none found.
 func (m *model) findPrevViewableJob() int {
@@ -156,21 +172,37 @@ func (m *model) logHelpRows() [][]helpItem {
 }
 
 // normalizeSelectionIfHidden adjusts selectedIdx/selectedJobID if the current
-// selection is hidden (e.g., marked closed with hideClosed filter active).
+// selection is hidden or out of bounds (e.g., job removed while in review
+// view, or marked closed with hideClosed filter active).
 // Call this when returning to queue view from review view.
 func (m *model) normalizeSelectionIfHidden() {
-	if m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) && !m.isJobVisible(m.jobs[m.selectedIdx]) {
-		idx := m.findPrevVisibleJob(m.selectedIdx)
-		if idx < 0 {
-			idx = m.findNextVisibleJob(m.selectedIdx)
+	if len(m.jobs) == 0 {
+		m.selectedIdx = -1
+		m.selectedJobID = 0
+		return
+	}
+	if m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
+		clamped := max(0, min(len(m.jobs)-1, m.selectedIdx))
+		idx := m.findNearestVisibleJob(clamped)
+		if idx >= 0 {
+			m.selectedIdx = idx
+			m.updateSelectedJobID()
+		} else {
+			m.selectedIdx = -1
+			m.selectedJobID = 0
 		}
-		if idx < 0 {
-			idx = m.findFirstVisibleJob()
-		}
+		return
+	}
+	if !m.isJobVisible(m.jobs[m.selectedIdx]) {
+		idx := m.findNearestVisibleJob(m.selectedIdx)
 		if idx >= 0 {
 			m.selectedIdx = idx
 			m.updateSelectedJobID()
 		}
+	} else if m.selectedJobID != m.jobs[m.selectedIdx].ID {
+		// Resync stale selectedJobID (e.g., a job was removed from
+		// the middle while in a review-anchored view).
+		m.updateSelectedJobID()
 	}
 }
 
@@ -220,6 +252,25 @@ func (m *model) maybePrefetch(idx int) tea.Cmd {
 		return m.fetchMoreJobs()
 	}
 	return nil
+}
+
+// findNearestVisibleJob returns the nearest visible job to fromIdx.
+// It checks fromIdx itself first, then searches older jobs (higher
+// indices), then newer jobs (lower indices), then falls back to the
+// first visible job in the list.
+func (m model) findNearestVisibleJob(fromIdx int) int {
+	if fromIdx >= 0 && fromIdx < len(m.jobs) &&
+		m.isJobVisible(m.jobs[fromIdx]) {
+		return fromIdx
+	}
+	idx := m.findPrevVisibleJob(fromIdx)
+	if idx < 0 {
+		idx = m.findNextVisibleJob(fromIdx)
+	}
+	if idx < 0 {
+		idx = m.findFirstVisibleJob()
+	}
+	return idx
 }
 
 // findFirstVisibleJob returns the index of the first visible job.
