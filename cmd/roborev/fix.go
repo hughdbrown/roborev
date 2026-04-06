@@ -501,15 +501,12 @@ func runFixOpen(cmd *cobra.Command, branch string, allBranches, explicitBranch, 
 }
 
 // filterReachableJobs returns only those jobs relevant to the
-// current worktree. SHA and range refs are checked via the commit
-// graph; non-SHA refs (dirty, empty, task labels) fall back to
-// branch matching. branchOverride is the explicit --branch value
-// for non-mutating flows (e.g. --list); when set, all job types
-// use branch matching so cross-branch listing works for SHA/range
-// jobs too. Mutating flows (fix, --batch) pass "" so that
-// commit-graph reachability is checked. Callers that want all
-// branches (--all-branches) skip this function entirely. On git
-// errors the job is kept (fail open) to avoid silently dropping work.
+// current worktree by matching the job's stored Branch field
+// against the current (or overridden) branch. branchOverride is
+// the explicit --branch value for non-mutating flows (e.g. --list).
+// Mutating flows (fix, --batch) pass "" so that the current branch
+// is auto-detected. Callers that want all branches (--all-branches)
+// skip this function entirely.
 func filterReachableJobs(
 	worktreeRoot, branchOverride string,
 	jobs []storage.ReviewJob,
@@ -520,71 +517,19 @@ func filterReachableJobs(
 	}
 	var filtered []storage.ReviewJob
 	for _, j := range jobs {
-		if jobReachable(
-			worktreeRoot, matchBranch, branchOverride != "", j,
-		) {
+		if branchMatch(matchBranch, j.Branch) {
 			filtered = append(filtered, j)
 		}
 	}
 	return filtered
 }
 
-// jobReachable decides whether a single job belongs to the current
-// worktree. When branchOnly is true (explicit --branch in a
-// non-mutating flow), all job types match by Branch field so
-// cross-branch listing works. Otherwise SHA and range refs are
-// checked via the commit graph, and non-SHA refs fall back to
-// branch matching.
-func jobReachable(
-	worktreeRoot, matchBranch string,
-	branchOnly bool, j storage.ReviewJob,
-) bool {
-	ref := j.GitRef
-
-	// When an explicit branch was requested (non-mutating listing),
-	// match all job types by their stored Branch field.
-	if branchOnly {
-		return branchMatch(matchBranch, j.Branch)
-	}
-
-	// Range ref: check whether the end commit is reachable.
-	if _, end, ok := git.ParseRange(ref); ok {
-		reachable, err := git.IsAncestor(worktreeRoot, end, "HEAD")
-		if err != nil || reachable {
-			return true
-		}
-		// SHA unreachable (commit may have been rebased) —
-		// fall back to branch matching.
-		return branchMatch(matchBranch, j.Branch)
-	}
-
-	// SHA ref: check commit graph reachability.
-	if git.LooksLikeSHA(ref) {
-		reachable, err := git.IsAncestor(worktreeRoot, ref, "HEAD")
-		if err != nil || reachable {
-			return true
-		}
-		// SHA unreachable (commit may have been rebased) —
-		// fall back to branch matching.
-		return branchMatch(matchBranch, j.Branch)
-	}
-
-	// Non-SHA ref (empty, "dirty", task labels like "run"/"analyze"):
-	// match by branch when possible.
-	return branchMatch(matchBranch, j.Branch)
-}
-
-// branchMatch returns true when a job's branch is compatible with
-// the match branch. When both are known they must be equal. When
-// the job has no branch, fail open (include it). When the match
-// branch is unknown (detached HEAD), exclude jobs that do have a
-// branch to avoid cross-worktree leaks in mutating flows.
+// branchMatch returns true when a job's branch matches the target.
+// Both must be known and equal. Jobs with no branch are excluded
+// (use --all-branches to include them).
 func branchMatch(matchBranch, jobBranch string) bool {
-	if matchBranch == "" {
-		return jobBranch == ""
-	}
-	if jobBranch == "" {
-		return true
+	if matchBranch == "" || jobBranch == "" {
+		return false
 	}
 	return jobBranch == matchBranch
 }

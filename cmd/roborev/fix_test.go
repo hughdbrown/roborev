@@ -819,6 +819,7 @@ func TestFixAllBranchesDiscovery(t *testing.T) {
 
 func TestRunFixOpen(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
+	repoBranch := strings.TrimSpace(repo.Run("rev-parse", "--abbrev-ref", "HEAD"))
 
 	t.Run("no open jobs", func(t *testing.T) {
 		_ = newMockDaemonBuilder(t).
@@ -851,8 +852,8 @@ func TestRunFixOpen(t *testing.T) {
 					if openQueryCalls.Add(1) == 1 {
 						writeJSON(w, map[string]any{
 							"jobs": []storage.ReviewJob{
-								{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
-								{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
+								{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
+								{ID: 20, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 							},
 							"has_more": false,
 						})
@@ -1075,6 +1076,7 @@ func TestRunFixOpen(t *testing.T) {
 
 func TestRunFixOpenOrdering(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
+	repoBranch := strings.TrimSpace(repo.Run("rev-parse", "--abbrev-ref", "HEAD"))
 
 	makeBuilder := func() (*MockDaemonBuilder, *atomic.Int32) {
 		var openQueryCalls atomic.Int32
@@ -1086,9 +1088,9 @@ func TestRunFixOpenOrdering(t *testing.T) {
 						// Return newest first (as the API does)
 						writeJSON(w, map[string]any{
 							"jobs": []storage.ReviewJob{
-								{ID: 30, Status: storage.JobStatusDone, Agent: "test"},
-								{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
-								{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+								{ID: 30, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
+								{ID: 20, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
+								{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 							},
 							"has_more": false,
 						})
@@ -1148,6 +1150,7 @@ func TestRunFixOpenOrdering(t *testing.T) {
 }
 func TestRunFixOpenRequery(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
+	repoBranch := strings.TrimSpace(repo.Run("rev-parse", "--abbrev-ref", "HEAD"))
 
 	var queryCount atomic.Int32
 	_ = newMockDaemonBuilder(t).
@@ -1160,7 +1163,7 @@ func TestRunFixOpenRequery(t *testing.T) {
 					// First query: return batch 1
 					writeJSON(w, map[string]any{
 						"jobs": []storage.ReviewJob{
-							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+							{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 						},
 						"has_more": false,
 					})
@@ -1168,8 +1171,8 @@ func TestRunFixOpenRequery(t *testing.T) {
 					// Second query: new job appeared
 					writeJSON(w, map[string]any{
 						"jobs": []storage.ReviewJob{
-							{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
-							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+							{ID: 20, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
+							{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 						},
 						"has_more": false,
 					})
@@ -1216,6 +1219,7 @@ func TestRunFixOpenRequery(t *testing.T) {
 
 func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
+	repoBranch := strings.TrimSpace(repo.Run("rev-parse", "--abbrev-ref", "HEAD"))
 
 	deadURL := "http://127.0.0.1:1"
 	var recoveryQueryCount atomic.Int32
@@ -1227,8 +1231,8 @@ func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
 				if recoveryQueryCount.Add(1) == 1 {
 					writeJSON(w, map[string]any{
 						"jobs": []storage.ReviewJob{
-							{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
-							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+							{ID: 20, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
+							{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 						},
 						"has_more": false,
 					})
@@ -1242,7 +1246,7 @@ func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
 			}
 			writeJSON(w, map[string]any{
 				"jobs": []storage.ReviewJob{
-					{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
+					{ID: 20, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 				},
 				"has_more": false,
 			})
@@ -1275,7 +1279,7 @@ func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
 				openQueryCount.Add(1)
 				writeJSON(w, map[string]any{
 					"jobs": []storage.ReviewJob{
-						{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+						{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 					},
 					"has_more": false,
 				})
@@ -1283,7 +1287,7 @@ func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
 			}
 			writeJSON(w, map[string]any{
 				"jobs": []storage.ReviewJob{
-					{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+					{ID: 10, Status: storage.JobStatusDone, Agent: "test", Branch: repoBranch},
 				},
 				"has_more": false,
 			})
@@ -2843,9 +2847,9 @@ func TestFilterReachableJobs(t *testing.T) {
 		wantIDs        []int64
 	}{
 		{
-			name: "reachable commit included",
+			name: "reachable commit with matching branch included",
 			jobs: []storage.ReviewJob{
-				{ID: 1, GitRef: mainSHA},
+				{ID: 1, GitRef: mainSHA, Branch: defaultBranch},
 			},
 			wantIDs: []int64{1},
 		},
@@ -2864,16 +2868,16 @@ func TestFilterReachableJobs(t *testing.T) {
 			wantIDs: []int64{2},
 		},
 		{
-			name: "unreachable SHA no branch fails open",
+			name: "unreachable SHA no branch excluded",
 			jobs: []storage.ReviewJob{
 				{ID: 2, GitRef: otherSHA},
 			},
-			wantIDs: []int64{2},
+			wantIDs: nil,
 		},
 		{
-			name: "mixed reachable and unreachable different branch",
+			name: "mixed matching and non-matching branches",
 			jobs: []storage.ReviewJob{
-				{ID: 1, GitRef: mainSHA},
+				{ID: 1, GitRef: mainSHA, Branch: defaultBranch},
 				{ID: 2, GitRef: otherSHA, Branch: "other-branch"},
 			},
 			wantIDs: []int64{1},
@@ -2893,11 +2897,11 @@ func TestFilterReachableJobs(t *testing.T) {
 			wantIDs: nil,
 		},
 		{
-			name: "empty GitRef no branch fails open",
+			name: "empty GitRef no branch excluded",
 			jobs: []storage.ReviewJob{
 				{ID: 3, GitRef: ""},
 			},
-			wantIDs: []int64{3},
+			wantIDs: nil,
 		},
 		{
 			name: "dirty ref matching branch included",
@@ -2914,16 +2918,17 @@ func TestFilterReachableJobs(t *testing.T) {
 			wantIDs: nil,
 		},
 		{
-			name: "dirty ref no branch fails open",
+			name: "dirty ref no branch excluded",
 			jobs: []storage.ReviewJob{
 				{ID: 4, GitRef: "dirty"},
 			},
-			wantIDs: []int64{4},
+			wantIDs: nil,
 		},
 		{
-			name: "range ref with reachable end included",
+			name: "range ref matching branch included",
 			jobs: []storage.ReviewJob{
-				{ID: 5, GitRef: otherSHA + ".." + mainSHA},
+				{ID: 5, GitRef: otherSHA + ".." + mainSHA,
+					Branch: defaultBranch},
 			},
 			wantIDs: []int64{5},
 		},
@@ -2944,18 +2949,18 @@ func TestFilterReachableJobs(t *testing.T) {
 			wantIDs: []int64{5},
 		},
 		{
-			name: "range ref with bad end fails open",
+			name: "range ref no branch excluded",
 			jobs: []storage.ReviewJob{
 				{ID: 5, GitRef: "abc123..def456"},
 			},
-			wantIDs: []int64{5},
+			wantIDs: nil,
 		},
 		{
-			name: "unknown SHA fails open (included)",
+			name: "unknown SHA no branch excluded",
 			jobs: []storage.ReviewJob{
 				{ID: 6, GitRef: "0000000000000000000000000000000000000000"},
 			},
-			wantIDs: []int64{6},
+			wantIDs: nil,
 		},
 		{
 			name: "task ref matching branch included",
@@ -2974,12 +2979,12 @@ func TestFilterReachableJobs(t *testing.T) {
 			wantIDs: nil,
 		},
 		{
-			name: "task ref no branch fails open",
+			name: "task ref no branch excluded",
 			jobs: []storage.ReviewJob{
 				{ID: 9, GitRef: "custom-label",
 					JobType: storage.JobTypeTask},
 			},
-			wantIDs: []int64{9},
+			wantIDs: nil,
 		},
 		{
 			name:           "branch override includes matching dirty ref",
@@ -3042,25 +3047,25 @@ func TestFilterReachableJobsDetachedHead(t *testing.T) {
 		wantIDs []int64
 	}{
 		{
-			name: "SHA ref still uses commit graph",
+			name: "no branch matches detached HEAD",
 			jobs: []storage.ReviewJob{
 				{ID: 1, GitRef: sha},
 			},
-			wantIDs: []int64{1},
+			wantIDs: nil,
 		},
 		{
-			name: "dirty ref with branch excluded (no match possible)",
+			name: "branch excluded on detached HEAD",
 			jobs: []storage.ReviewJob{
 				{ID: 2, GitRef: "dirty", Branch: "some-branch"},
 			},
 			wantIDs: nil,
 		},
 		{
-			name: "dirty ref without branch fails open",
+			name: "branchless excluded on detached HEAD",
 			jobs: []storage.ReviewJob{
 				{ID: 3, GitRef: "dirty"},
 			},
-			wantIDs: []int64{3},
+			wantIDs: nil,
 		},
 	}
 
@@ -3200,13 +3205,11 @@ func TestRunFixOpenFiltersUnreachableJobs(t *testing.T) {
 		"main-only job should be filtered out")
 }
 
-// TestRunFixOpenFindsMergedBranchJobs verifies that roborev fix on the
-// main branch discovers jobs whose commits were originally reviewed on
-// a feature branch and later merged to main. The API query must NOT
-// filter by branch when the branch was auto-resolved (not --branch),
-// so that filterReachableJobs can accept the job via commit-graph
-// reachability.
-func TestRunFixOpenFindsMergedBranchJobs(t *testing.T) {
+// TestRunFixOpenExcludesMergedBranchJobs verifies that roborev fix on
+// the main branch does NOT process jobs whose commits were originally
+// reviewed on a feature branch, even when those commits are reachable
+// from HEAD via a merge. Jobs are scoped by their stored Branch field.
+func TestRunFixOpenExcludesMergedBranchJobs(t *testing.T) {
 	repo := newTestGitRepo(t)
 	repo.CommitFile("base.txt", "base", "initial commit")
 
@@ -3226,14 +3229,11 @@ func TestRunFixOpenFindsMergedBranchJobs(t *testing.T) {
 
 	var processedJobIDs []int64
 	var mu sync.Mutex
-	var apiQueries []string
 
 	_ = newMockDaemonBuilder(t).
 		WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
-			apiQueries = append(apiQueries, r.URL.RawQuery)
 			if q.Get("closed") == "false" && q.Get("limit") == "0" {
-				// Return job created on the feature branch
 				writeJSON(w, map[string]any{
 					"jobs": []storage.ReviewJob{
 						{
@@ -3279,7 +3279,6 @@ func TestRunFixOpenFindsMergedBranchJobs(t *testing.T) {
 		Build()
 
 	// Run from main with auto-resolved branch (explicitBranch=false).
-	// The feature SHA is reachable from HEAD via the merge commit.
 	_, runErr := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 		return runFixOpen(
 			cmd, defaultBranch, false, false, false,
@@ -3288,16 +3287,103 @@ func TestRunFixOpenFindsMergedBranchJobs(t *testing.T) {
 	})
 	require.NoError(t, runErr, "runFixOpen")
 
-	// The API query should NOT include a branch filter
-	require.NotEmpty(t, apiQueries,
-		"expected at least one API query")
-	assert.NotContains(t, apiQueries[0], "branch=",
-		"auto-resolved branch should not filter API query")
-
-	// The merged feature job should be processed
+	// The feature branch job should NOT be processed — branch
+	// scoping excludes jobs from other branches even when the
+	// commit is reachable via a merge.
 	mu.Lock()
 	ids := processedJobIDs
 	mu.Unlock()
-	assert.Contains(t, ids, int64(300),
-		"merged feature branch job should be found via commit-graph")
+	assert.NotContains(t, ids, int64(300),
+		"feature branch job should be excluded on main")
+}
+
+// TestFilterReachableJobsFeatureBranch verifies that on a feature
+// branch, jobs from other branches are excluded even though their
+// SHAs are reachable from HEAD. Jobs with no branch fail open.
+func TestFilterReachableJobsFeatureBranch(t *testing.T) {
+	repo := newTestGitRepo(t)
+	baseSHA := repo.CommitFile("base.txt", "base", "base commit")
+
+	defaultBranch := strings.TrimSpace(
+		repo.Run("rev-parse", "--abbrev-ref", "HEAD"),
+	)
+
+	mainOnlySHA := repo.CommitFile(
+		"main-only.txt", "m", "main-only commit",
+	)
+
+	repo.Run("checkout", "-b", "feature-x")
+	featureSHA := repo.CommitFile(
+		"feature.txt", "f", "feature commit",
+	)
+
+	tests := []struct {
+		name    string
+		jobs    []storage.ReviewJob
+		wantIDs []int64
+	}{
+		{
+			name: "feature branch commit included",
+			jobs: []storage.ReviewJob{
+				{ID: 1, GitRef: featureSHA, Branch: "feature-x"},
+			},
+			wantIDs: []int64{1},
+		},
+		{
+			name: "base branch commit with base branch excluded",
+			jobs: []storage.ReviewJob{
+				{
+					ID: 2, GitRef: mainOnlySHA,
+					Branch: defaultBranch,
+				},
+			},
+			wantIDs: nil,
+		},
+		{
+			name: "base branch commit with no branch excluded",
+			jobs: []storage.ReviewJob{
+				{ID: 3, GitRef: baseSHA},
+			},
+			wantIDs: nil,
+		},
+		{
+			name: "base branch commit matching branch included",
+			jobs: []storage.ReviewJob{
+				{
+					ID: 4, GitRef: mainOnlySHA,
+					Branch: "feature-x",
+				},
+			},
+			wantIDs: []int64{4},
+		},
+		{
+			name: "mixed: matching and branchless survive",
+			jobs: []storage.ReviewJob{
+				{
+					ID: 10, GitRef: featureSHA,
+					Branch: "feature-x",
+				},
+				{
+					ID: 20, GitRef: mainOnlySHA,
+					Branch: defaultBranch,
+				},
+				{
+					ID: 30, GitRef: baseSHA,
+					Branch: "other",
+				},
+			},
+			wantIDs: []int64{10},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filterReachableJobs(repo.Dir, "", tt.jobs)
+			var gotIDs []int64
+			for _, j := range got {
+				gotIDs = append(gotIDs, j.ID)
+			}
+			assert.Equal(t, tt.wantIDs, gotIDs)
+		})
+	}
 }
