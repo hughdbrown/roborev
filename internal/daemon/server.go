@@ -1105,6 +1105,10 @@ func (s *Server) humaGetStatus(
 	}
 	configReloadCounter := s.configWatcher.ReloadCounter()
 
+	s.endpointMu.Lock()
+	ep := s.endpoint
+	s.endpointMu.Unlock()
+
 	resp := &GetStatusOutput{}
 	resp.Body = storage.DaemonStatus{
 		Version:             version.Version,
@@ -1119,6 +1123,9 @@ func (s *Server) humaGetStatus(
 		AutoDesign:          s.autoDesignStatusForResponse(),
 		ActiveWorkers:       s.workerPool.ActiveWorkers(),
 		MaxWorkers:          s.workerPool.MaxWorkers(),
+		Network:             ep.Network,
+		Address:             ep.Address,
+		Port:                ep.Port(),
 		MachineID:           s.getMachineID(),
 		ConfigReloadedAt:    configReloadedAt,
 		ConfigReloadCounter: configReloadCounter,
