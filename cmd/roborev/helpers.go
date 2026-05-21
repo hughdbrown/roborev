@@ -9,15 +9,78 @@ import (
 	"github.com/roborev-dev/roborev/internal/git"
 	"github.com/roborev-dev/roborev/internal/githook"
 	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/spf13/cobra"
 )
 
-// exitError is an error that signals a specific exit code
+// exitError signals a specific exit code with no further error output.
+// Always construct via silentExit so cobra's "Error: ..." line is suppressed
+// for this command — the caller has already printed any user-facing message.
+// If cause is set, Error()/Unwrap() expose it so programmatic callers can
+// still inspect the underlying failure; cobra's printing is still silenced
+// via the SilenceErrors flag that silentExit sets.
 type exitError struct {
-	code int
+	code  int
+	cause error
 }
 
 func (e *exitError) Error() string {
+	if e.cause != nil {
+		return e.cause.Error()
+	}
 	return fmt.Sprintf("exit code %d", e.code)
+}
+
+func (e *exitError) Unwrap() error { return e.cause }
+
+// silentExit returns an exitError and silences cobra's error output for
+// the given command. Use when the caller has already printed any user-
+// facing message and just needs the process to exit with a specific code.
+// Must only be called from a single-threaded context (RunE, post-join code),
+// not from goroutines that share cmd.
+func silentExit(cmd *cobra.Command, code int) error {
+	cmd.SilenceErrors = true
+	return &exitError{code: code}
+}
+
+// silenceIfExit silences cobra's error output for cmd when err is an
+// *exitError, then returns err unchanged. Use at top-level RunE return
+// points whose error may have originated in concurrent code that could
+// not safely mutate cmd itself.
+func silenceIfExit(cmd *cobra.Command, err error) error {
+	if _, ok := err.(*exitError); ok {
+		cmd.SilenceErrors = true
+	}
+	return err
+}
+
+// usageErr re-enables the usage block for cmd and returns err. Use inside
+// RunE for validation that's semantically part of the invocation contract
+// (mutually exclusive flags, missing required values, bad enum values).
+// PersistentPreRunE on the root silences usage for runtime errors; this
+// flips it back for the specific case of "the user invoked me wrong."
+func usageErr(cmd *cobra.Command, err error) error {
+	cmd.SilenceUsage = false
+	return err
+}
+
+// quietExit prepares a --quiet command's error for return. It silences
+// the usage block (so an upstream usageErr doesn't print a help wall
+// in quiet mode) and wraps plain errors in *exitError{code: 1} so the
+// process exits non-zero, but it does NOT silence cobra's "Error: ..."
+// line — runtime failures (daemon down, bad git ref, polling errors)
+// should still tell the user what went wrong. Verdict-based exits use
+// the bare *exitError sentinel; their callers silence cobra separately
+// via silenceIfExit because that path has already shown the review
+// output (or chose not to in quiet mode).
+func quietExit(cmd *cobra.Command, err error) error {
+	if err == nil {
+		return nil
+	}
+	cmd.SilenceUsage = true
+	if _, ok := err.(*exitError); ok {
+		return err
+	}
+	return &exitError{code: 1, cause: err}
 }
 
 func shortRef(ref string) string {

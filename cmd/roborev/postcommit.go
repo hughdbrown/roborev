@@ -33,9 +33,13 @@ func postCommitCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:           "post-commit",
-		Short:         "Hook entry point: enqueue a review after commit",
-		Args:          cobra.NoArgs,
+		Use:   "post-commit",
+		Short: "Hook entry point: enqueue a review after commit",
+		Args:  cobra.NoArgs,
+		// Hook entrypoint: any failure must be silent (logged to the
+		// hook log file, never printed to git's stderr). Set both
+		// silences explicitly so future changes that return non-nil
+		// from RunE don't leak Cobra-formatted output to git.
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {

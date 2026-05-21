@@ -53,7 +53,7 @@ Examples:
 
 			if len(args) == 0 {
 				if forceJobID {
-					return fmt.Errorf("--job requires a job ID argument")
+					return usageErr(cmd, fmt.Errorf("--job requires a job ID argument"))
 				}
 				// Default to HEAD
 				sha := "HEAD"

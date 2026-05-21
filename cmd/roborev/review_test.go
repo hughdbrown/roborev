@@ -28,6 +28,9 @@ func executeReviewCmd(
 	var stdout, stderr bytes.Buffer
 
 	cmd := reviewCmd()
+	// Mirror main.go: the production root sets SilenceUsage in
+	// PersistentPreRunE, which a standalone reviewCmd() bypasses.
+	cmd.SilenceUsage = true
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(args)

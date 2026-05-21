@@ -84,11 +84,14 @@ func newWaitEnv(t *testing.T, handler http.Handler) *waitEnv {
 }
 
 // runWait executes the wait command with the given args and returns
-// captured stdout and the error.
+// captured stdout and the error. It mirrors main.go's setup by silencing
+// the usage block for runtime errors (the production root sets this in
+// PersistentPreRunE, which a freshly-constructed waitCmd() bypasses).
 func runWait(t *testing.T, args ...string) (stdout string, err error) {
 	t.Helper()
 	var out bytes.Buffer
 	cmd := waitCmd()
+	cmd.SilenceUsage = true
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs(args)
@@ -494,13 +497,13 @@ func newMultiJobMockHandler(jobs map[int64]mockJobResult) http.HandlerFunc {
 	return mux.ServeHTTP
 }
 
-func TestWaitReviewFetchErrorIsPlainError(t *testing.T) {
+func TestWaitReviewFetchErrorExposesCauseInQuietMode(t *testing.T) {
 	setupFastPolling(t)
 
-	// Job completes but /api/review returns 404. This should surface as a
-	// plain error (from showReview), not an *exitError. Both map to exit 1
-	// in practice, but the distinction matters for error reporting: plain
-	// errors print Cobra's "Error:" prefix while exitError silences it.
+	// Job completes but /api/review returns 404. In --quiet mode the
+	// command exits with code 1, the usage block is suppressed, and
+	// cobra prints the underlying cause via err.Error() so the user
+	// (or the hook log) can still see what failed.
 	mock := mockConfig{
 		Jobs: []storage.ReviewJob{{ID: 1, Agent: "test", Status: "done"}},
 		// Review is nil, so 404
@@ -508,10 +511,8 @@ func TestWaitReviewFetchErrorIsPlainError(t *testing.T) {
 	newWaitEnv(t, newWaitMockHandler(mock))
 
 	_, err := runWait(t, "--sha", "HEAD", "--quiet")
-	require.Error(t, err)
-	// Should be a plain error, not an *exitError
-	_, ok := err.(*exitError)
-	assert.False(t, ok, "review fetch failure should be a plain error, not exitError")
+	requireExitCode(t, err, 1)
+	assert.Contains(t, err.Error(), "review", "underlying cause should remain accessible")
 }
 
 func TestWaitLookupNon200Response(t *testing.T) {

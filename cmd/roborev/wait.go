@@ -45,19 +45,19 @@ Examples:
   roborev wait --job 10 20 30    # Wait for multiple job IDs
   roborev wait --sha HEAD~1      # Wait for job matching HEAD~1`,
 		Args: cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// In quiet mode, suppress cobra's error output
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			// In quiet mode (post-commit hook), collapse any error into a
+			// silent non-zero exit so the hook doesn't write to stderr.
 			if quiet {
-				cmd.SilenceErrors = true
-				cmd.SilenceUsage = true
+				defer func() { err = quietExit(cmd, err) }()
 			}
 
 			// Validate flag/arg combinations
 			if len(args) > 0 && shaFlag != "" {
-				return fmt.Errorf("cannot use both a positional argument and --sha")
+				return usageErr(cmd, fmt.Errorf("cannot use both a positional argument and --sha"))
 			}
 			if forceJobID && len(args) == 0 {
-				return fmt.Errorf("--job requires a job ID argument")
+				return usageErr(cmd, fmt.Errorf("--job requires a job ID argument"))
 			}
 
 			// Multiple args: wait for all concurrently
@@ -131,38 +131,33 @@ Examples:
 					if !quiet {
 						cmd.Printf("No job found for %s\n", ref)
 					}
-					cmd.SilenceErrors = true
-					cmd.SilenceUsage = true
-					return &exitError{code: 1}
+					return silentExit(cmd, 1)
 				}
 				jobID = job.ID
 			}
 
 			ep := getDaemonEndpoint()
-			err := waitForJob(cmd, ep, jobID, quiet)
-			if err != nil {
+			waitErr := waitForJob(cmd, ep, jobID, quiet)
+			if waitErr != nil {
 				// Map ErrJobNotFound to exit 1 with a user-facing message
 				// (waitForJob returns a plain error to stay compatible with reviewCmd)
-				if errors.Is(err, ErrJobNotFound) {
+				if errors.Is(waitErr, ErrJobNotFound) {
 					if !quiet {
 						cmd.Printf("No job found for job %d\n", jobID)
 					}
-					cmd.SilenceErrors = true
-					cmd.SilenceUsage = true
-					return &exitError{code: 1}
-				}
-				if _, isExitErr := err.(*exitError); isExitErr {
-					cmd.SilenceErrors = true
-					cmd.SilenceUsage = true
+					return silentExit(cmd, 1)
 				}
 			}
-			return err
+			// Verdict-fail comes back as a bare *exitError from showReview;
+			// silence cobra's printing here (showReview can't, since it may
+			// be called from waitMultiple goroutines that share cmd).
+			return silenceIfExit(cmd, waitErr)
 		},
 	}
 
 	cmd.Flags().StringVar(&shaFlag, "sha", "", "git ref to find the most recent job for")
 	cmd.Flags().BoolVar(&forceJobID, "job", false, "force arguments to be treated as job IDs")
-	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress output (for use in hooks)")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress informational output and the usage block; runtime errors are still printed")
 
 	return cmd
 }
@@ -239,9 +234,7 @@ func waitMultiple(
 			if !quiet {
 				cmd.Printf("No job found for %s\n", r.ref)
 			}
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return &exitError{code: 1}
+			return silentExit(cmd, 1)
 		}
 		jobIDs = append(jobIDs, job.ID)
 	}
@@ -287,9 +280,23 @@ func waitMultiple(
 	}
 
 	if hasErr {
-		cmd.SilenceErrors = true
-		cmd.SilenceUsage = true
-		return &exitError{code: 1}
+		// In quiet mode the per-job loop above printed nothing, so a
+		// silent exit would leave the caller with no clue what failed.
+		// Surface the first runtime error (plain error, not *exitError)
+		// so the quiet defer's quietExit can wrap it and cobra can show
+		// the cause. If every error is an *exitError (verdict-fail or
+		// job-not-found), nothing more useful can be said.
+		if quiet {
+			for _, r := range results {
+				if r.err == nil {
+					continue
+				}
+				if _, ok := r.err.(*exitError); !ok {
+					return r.err
+				}
+			}
+		}
+		return silentExit(cmd, 1)
 	}
 
 	return nil

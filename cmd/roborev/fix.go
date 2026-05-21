@@ -95,22 +95,22 @@ Examples:
 			}
 
 			if allBranches && branch != "" {
-				return fmt.Errorf("--all-branches and --branch are mutually exclusive")
+				return usageErr(cmd, fmt.Errorf("--all-branches and --branch are mutually exclusive"))
 			}
 			if allBranches && len(args) > 0 {
-				return fmt.Errorf("--all-branches cannot be used with positional job IDs")
+				return usageErr(cmd, fmt.Errorf("--all-branches cannot be used with positional job IDs"))
 			}
 			if branch != "" && len(args) > 0 {
-				return fmt.Errorf("--branch cannot be used with positional job IDs")
+				return usageErr(cmd, fmt.Errorf("--branch cannot be used with positional job IDs"))
 			}
 			if newestFirst && len(args) > 0 {
-				return fmt.Errorf("--newest-first cannot be used with positional job IDs")
+				return usageErr(cmd, fmt.Errorf("--newest-first cannot be used with positional job IDs"))
 			}
 			if list && len(args) > 0 {
-				return fmt.Errorf("--list cannot be used with positional job IDs")
+				return usageErr(cmd, fmt.Errorf("--list cannot be used with positional job IDs"))
 			}
 			if list && batch {
-				return fmt.Errorf("--list and --batch are mutually exclusive")
+				return usageErr(cmd, fmt.Errorf("--list and --batch are mutually exclusive"))
 			}
 			if list && batchSize > 0 {
 				return fmt.Errorf("--list and --batch-size are mutually exclusive")
@@ -164,7 +164,7 @@ Examples:
 					jobIDs = append(jobIDs, id)
 				}
 				if len(jobIDs) > 0 && (branch != "" || allBranches || newestFirst) {
-					return fmt.Errorf("--branch, --all-branches, and --newest-first cannot be used with explicit job IDs")
+					return usageErr(cmd, fmt.Errorf("--branch, --all-branches, and --newest-first cannot be used with explicit job IDs"))
 				}
 				if len(jobIDs) == 0 {
 					effectiveBranch := resolveCurrentBranchFilter(

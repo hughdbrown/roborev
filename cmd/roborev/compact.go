@@ -69,7 +69,7 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Validate flags
 			if branch != "" && allBranches {
-				return fmt.Errorf("--branch and --all-branches are mutually exclusive")
+				return usageErr(cmd, fmt.Errorf("--branch and --all-branches are mutually exclusive"))
 			}
 
 			return runCompact(cmd, compactOptions{

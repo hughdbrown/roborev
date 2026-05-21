@@ -55,7 +55,6 @@ Examples:
   roborev insights --repo /path/to/repo     # Specific repo
   roborev insights --agent gemini --wait    # Use specific agent, wait for result
   roborev insights --json                   # Output job info as JSON`,
-		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runInsights(cmd, insightsOptions{
 				repoPath:   repoPath,

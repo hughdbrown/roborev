@@ -17,7 +17,17 @@ func main() {
 		Short: "Automatic code review for git commits",
 		Long:  "roborev automatically reviews git commits using AI agents (Codex, Claude Code, Gemini, Copilot, OpenCode, Cursor, Kiro, Pi)",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			return validateServerFlag()
+			// validateServerFlag is itself part of the invocation contract
+			// (an invalid --server value is a usage problem, not a runtime
+			// problem), so run it first while SilenceUsage is still false.
+			if err := validateServerFlag(); err != nil {
+				return err
+			}
+			// Past this point cobra has validated everything it can, so
+			// errors from RunE just get a plain "Error: ..." line without
+			// the usage wall.
+			cmd.SilenceUsage = true
+			return nil
 		},
 	}
 
@@ -62,10 +72,12 @@ func main() {
 	rootCmd.AddCommand(versionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
-		// Check for exitError to exit with specific code without extra output
+		// exitError carries a specific exit code; the RunE that returned
+		// it has already silenced cobra's error printing via silentExit.
 		if exitErr, ok := err.(*exitError); ok {
 			os.Exit(exitErr.code)
 		}
+		// All other errors: cobra already printed them.
 		os.Exit(1)
 	}
 }

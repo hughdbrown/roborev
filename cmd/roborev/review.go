@@ -65,11 +65,11 @@ Examples:
   roborev review --type security   # Security-focused review of HEAD
   roborev review --branch --type security  # Security review of branch
 `,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// In quiet mode, suppress cobra's error output (hook uses &, so exit code doesn't matter)
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			// In quiet mode, any error becomes a silent non-zero exit
+			// (hook backgrounds the call, so output would be noise).
 			if quiet {
-				cmd.SilenceErrors = true
-				cmd.SilenceUsage = true
+				defer func() { err = quietExit(cmd, err) }()
 			}
 
 			// --fast is shorthand for --reasoning fast (explicit --reasoning takes precedence)
@@ -110,24 +110,24 @@ Examples:
 
 			// Validate mutually exclusive options
 			if branch != "" && dirty {
-				return fmt.Errorf("cannot use --branch with --dirty")
+				return usageErr(cmd, fmt.Errorf("cannot use --branch with --dirty"))
 			}
 			if branch != "" && since != "" {
-				return fmt.Errorf("cannot use --branch with --since")
+				return usageErr(cmd, fmt.Errorf("cannot use --branch with --since"))
 			}
 			if since != "" && dirty {
-				return fmt.Errorf("cannot use --since with --dirty")
+				return usageErr(cmd, fmt.Errorf("cannot use --since with --dirty"))
 			}
 			if branch != "" && len(args) > 0 {
-				return fmt.Errorf("cannot specify commits with --branch (to review a specific branch, use --branch=<name>)")
+				return usageErr(cmd, fmt.Errorf("cannot specify commits with --branch (to review a specific branch, use --branch=<name>)"))
 			}
 			if since != "" && len(args) > 0 {
-				return fmt.Errorf("cannot specify commits with --since")
+				return usageErr(cmd, fmt.Errorf("cannot specify commits with --since"))
 			}
 
 			// Validate --type flag
 			if reviewType != "" && reviewType != "security" && reviewType != "design" {
-				return fmt.Errorf("invalid --type %q (valid: security, design)", reviewType)
+				return usageErr(cmd, fmt.Errorf("invalid --type %q (valid: security, design)", reviewType))
 			}
 
 			// Auto-install/upgrade hooks when running from CLI
@@ -354,16 +354,12 @@ Examples:
 				}
 			}
 
-			// If --wait, poll until job completes and show result
+			// If --wait, poll until job completes and show result.
+			// Verdict-fail comes back as a bare *exitError; silence cobra
+			// here so the user doesn't see "Error: exit code 1" after the
+			// review output is already on screen.
 			if wait {
-				err := waitForJob(cmd, ep, job.ID, quiet)
-				// Only silence Cobra's error output for exitError (verdict-based exit codes)
-				// Keep error output for actual failures (network errors, job not found, etc.)
-				if _, isExitErr := err.(*exitError); isExitErr {
-					cmd.SilenceErrors = true
-					cmd.SilenceUsage = true
-				}
-				return err
+				return silenceIfExit(cmd, waitForJob(cmd, ep, job.ID, quiet))
 			}
 
 			return nil
@@ -376,7 +372,7 @@ Examples:
 	cmd.Flags().StringVar(&model, "model", "", "model for agent (format varies: opencode uses provider/model, others use model name)")
 	cmd.Flags().StringVar(&reasoning, "reasoning", "", "reasoning level: fast, standard, medium, thorough (default), or maximum")
 	cmd.Flags().BoolVar(&fast, "fast", false, "shorthand for --reasoning fast")
-	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress output (for use in hooks)")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress informational output and the usage block; runtime errors are still printed")
 	cmd.Flags().BoolVar(&dirty, "dirty", false, "review uncommitted changes instead of a commit")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for review to complete and show result")
 	cmd.Flags().StringVar(&branch, "branch", "", "review all changes since branch diverged from base (optionally specify branch name)")

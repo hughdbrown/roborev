@@ -110,7 +110,6 @@ Examples:
 		},
 	}
 
-	cmd.SilenceUsage = true
 	cmd.Flags().IntVar(&timeoutSecs, "timeout", 60, "timeout in seconds per agent")
 	cmd.Flags().StringVar(&agentFilter, "agent", "", "check only this agent")
 	cmd.Flags().BoolVar(&largePrompt, "large-prompt", false,

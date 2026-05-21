@@ -49,7 +49,7 @@ Examples:
 				// --job flag: treat ref as job ID
 				id, err := strconv.ParseInt(ref, 10, 64)
 				if err != nil {
-					return fmt.Errorf("--job requires numeric job ID, got %q", ref)
+					return usageErr(cmd, fmt.Errorf("--job requires numeric job ID, got %q", ref))
 				}
 				jobID = id
 			} else {

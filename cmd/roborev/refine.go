@@ -50,9 +50,8 @@ func refineCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:          "refine",
-		Short:        "Iterative review-fix loop until all reviews pass",
-		SilenceUsage: true,
+		Use:   "refine",
+		Short: "Iterative review-fix loop until all reviews pass",
 		Long: `Automatically address failed code reviews in a loop.
 
 Refine finds failed reviews on the current branch, runs an agent to fix

@@ -91,8 +91,11 @@ func waitForJob(cmd *cobra.Command, ep daemon.DaemonEndpoint, jobID int64, quiet
 	}
 }
 
-// showReview fetches and displays a review by job ID
+// showReview fetches and displays a review by job ID.
 // When quiet is true, suppresses output but still returns exit code based on verdict.
+// On a FAIL verdict returns a bare *exitError (no cmd mutation) so the function
+// is safe to call from concurrent goroutines; the top-level caller is responsible
+// for silencing cobra after all concurrent waits complete.
 func showReview(cmd *cobra.Command, ep daemon.DaemonEndpoint, jobID int64, quiet bool) error {
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -116,7 +119,6 @@ func showReview(cmd *cobra.Command, ep daemon.DaemonEndpoint, jobID int64, quiet
 	// Return exit code based on verdict
 	verdict := storage.ParseVerdict(review.Output)
 	if verdict == "F" {
-		// Use a special error that cobra will treat as exit code 1
 		return &exitError{code: 1}
 	}
 
