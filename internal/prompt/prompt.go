@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"go.kenn.io/roborev/internal/config"
@@ -60,6 +63,8 @@ type HistoricalReviewContext struct {
 type Builder struct {
 	db        *storage.DB
 	globalCfg *config.Config // optional global config for exclude patterns
+	repoPath  string
+	repoID    int64
 }
 
 // DiffFilePathPlaceholder is a sentinel path embedded in prebuilt
@@ -69,6 +74,17 @@ type Builder struct {
 const DiffFilePathPlaceholder = "/tmp/roborev diff placeholder"
 
 const dirtyTruncatedDiffMarker = "(Diff too large to include in full)"
+
+const DefaultStaleSnapshotAge = 24 * time.Hour
+
+const snapshotMarkerFile = ".roborev-snapshot"
+
+var (
+	activeSnapshotDirs sync.Map
+	// Protects the lifecycle window where snapshot directories are created,
+	// marked, and registered before cleanup may consider them stale.
+	snapshotLifecycleMu sync.Mutex
+)
 
 // NewBuilder creates a new prompt builder
 func NewBuilder(db *storage.DB) *Builder {
@@ -83,32 +99,40 @@ func NewBuilderWithConfig(
 	return &Builder{db: db, globalCfg: globalCfg}
 }
 
+// ForRepo returns a builder scoped to a repository.
+func (b *Builder) ForRepo(repoPath string, repoID int64) *Builder {
+	next := *b
+	next.repoPath = repoPath
+	next.repoID = repoID
+	return &next
+}
+
 // resolveMaxPromptSize returns the effective prompt budget from config.
-func (b *Builder) resolveMaxPromptSize(repoPath string) int {
-	return config.ResolveMaxPromptSize(repoPath, b.globalCfg)
+func (b *Builder) resolveMaxPromptSize() int {
+	return config.ResolveMaxPromptSize(b.repoPath, b.globalCfg)
 }
 
 // resolveExcludes returns the merged exclude patterns for a repo.
 // Security reviews skip repo-level patterns to prevent a compromised
 // default branch from hiding files from review.
 func (b *Builder) resolveExcludes(
-	repoPath, reviewType string,
+	reviewType string,
 ) []string {
 	return config.ResolveExcludePatterns(
-		repoPath, b.globalCfg, reviewType,
+		b.repoPath, b.globalCfg, reviewType,
 	)
 }
 
 // Build constructs a review prompt for a commit or range with context from previous reviews.
 // reviewType selects the system prompt variant (e.g., "security"); any default alias (see config.IsDefaultReviewType) uses the standard prompt.
-func (b *Builder) Build(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity string) (string, error) {
-	return b.BuildWithAdditionalContext(repoPath, gitRef, repoID, contextCount, agentName, reviewType, minSeverity, "")
+func (b *Builder) Build(gitRef string, contextCount int, agentName, reviewType, minSeverity string) (string, error) {
+	return b.BuildWithAdditionalContext(gitRef, contextCount, agentName, reviewType, minSeverity, "")
 }
 
 // BuildWithAdditionalContext constructs a review prompt with an optional
 // caller-provided markdown context block inserted ahead of the current diff.
-func (b *Builder) BuildWithAdditionalContext(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, additionalContext string) (string, error) {
-	return b.buildWithOpts(repoPath, gitRef, repoID, contextCount, agentName, reviewType, buildOpts{
+func (b *Builder) BuildWithAdditionalContext(gitRef string, contextCount int, agentName, reviewType, minSeverity, additionalContext string) (string, error) {
+	return b.buildWithOpts(gitRef, contextCount, agentName, reviewType, buildOpts{
 		additionalContext: additionalContext,
 		minSeverity:       minSeverity,
 	})
@@ -116,8 +140,8 @@ func (b *Builder) BuildWithAdditionalContext(repoPath, gitRef string, repoID int
 
 // BuildWithAdditionalContextAndDiffFile constructs a review prompt with
 // caller-provided markdown context and an optional oversized-diff file reference.
-func (b *Builder) BuildWithAdditionalContextAndDiffFile(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, additionalContext, diffFilePath string) (string, error) {
-	return b.buildWithOpts(repoPath, gitRef, repoID, contextCount, agentName, reviewType, buildOpts{
+func (b *Builder) BuildWithAdditionalContextAndDiffFile(gitRef string, contextCount int, agentName, reviewType, minSeverity, additionalContext, diffFilePath string) (string, error) {
+	return b.buildWithOpts(gitRef, contextCount, agentName, reviewType, buildOpts{
 		additionalContext: additionalContext,
 		diffFilePath:      diffFilePath,
 		requireDiffFile:   true,
@@ -127,19 +151,19 @@ func (b *Builder) BuildWithAdditionalContextAndDiffFile(repoPath, gitRef string,
 
 // BuildWithDiffFile constructs a review prompt where a pre-written diff file
 // is referenced for large diffs instead of inline content.
-func (b *Builder) BuildWithDiffFile(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, diffFilePath string) (string, error) {
-	return b.buildWithOpts(repoPath, gitRef, repoID, contextCount, agentName, reviewType, buildOpts{
+func (b *Builder) BuildWithDiffFile(gitRef string, contextCount int, agentName, reviewType, minSeverity, diffFilePath string) (string, error) {
+	return b.buildWithOpts(gitRef, contextCount, agentName, reviewType, buildOpts{
 		diffFilePath:    diffFilePath,
 		requireDiffFile: true,
 		minSeverity:     minSeverity,
 	})
 }
 
-func (b *Builder) buildWithOpts(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType string, opts buildOpts) (string, error) {
+func (b *Builder) buildWithOpts(gitRef string, contextCount int, agentName, reviewType string, opts buildOpts) (string, error) {
 	if git.IsRange(gitRef) {
-		return b.buildRangePrompt(repoPath, gitRef, repoID, contextCount, agentName, reviewType, opts)
+		return b.buildRangePrompt(gitRef, contextCount, agentName, reviewType, opts)
 	}
-	return b.buildSinglePrompt(repoPath, gitRef, repoID, contextCount, agentName, reviewType, opts)
+	return b.buildSinglePrompt(gitRef, contextCount, agentName, reviewType, opts)
 }
 
 // SnapshotResult holds a prompt and an optional cleanup function for a diff snapshot file.
@@ -150,16 +174,16 @@ type SnapshotResult struct {
 
 // BuildWithSnapshot builds a review prompt, automatically writing a diff snapshot file
 // when the diff is too large to inline.
-func (b *Builder) BuildWithSnapshot(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity string, excludes []string) (SnapshotResult, error) {
-	p, err := b.BuildWithDiffFile(repoPath, gitRef, repoID, contextCount, agentName, reviewType, minSeverity, "")
+func (b *Builder) BuildWithSnapshot(gitRef string, contextCount int, agentName, reviewType, minSeverity string, excludes []string) (SnapshotResult, error) {
+	p, err := b.BuildWithDiffFile(gitRef, contextCount, agentName, reviewType, minSeverity, "")
 	if !errors.Is(err, ErrDiffTruncatedNoFile) {
 		return SnapshotResult{Prompt: p}, err
 	}
-	diffFile, cleanup, writeErr := WriteDiffSnapshot(repoPath, gitRef, excludes)
+	diffFile, cleanup, writeErr := b.WriteDiffSnapshot(gitRef, excludes)
 	if writeErr != nil {
 		return SnapshotResult{}, fmt.Errorf("write diff snapshot: %w", writeErr)
 	}
-	p, err = b.BuildWithDiffFile(repoPath, gitRef, repoID, contextCount, agentName, reviewType, minSeverity, diffFile)
+	p, err = b.BuildWithDiffFile(gitRef, contextCount, agentName, reviewType, minSeverity, diffFile)
 	if err != nil {
 		cleanup()
 		return SnapshotResult{}, err
@@ -167,18 +191,18 @@ func (b *Builder) BuildWithSnapshot(repoPath, gitRef string, repoID int64, conte
 	return SnapshotResult{Prompt: p, Cleanup: cleanup}, nil
 }
 
-// WriteDiffSnapshot writes the full diff for a git ref to an external temp
+// WriteDiffSnapshot writes the full diff for a git ref to a repo-local temp
 // file. The file intentionally lives outside .git so sandboxed agents can read
 // it without inlining oversized diffs into the submitted prompt.
-func WriteDiffSnapshot(repoPath, gitRef string, excludes []string) (string, func(), error) {
+func (b *Builder) WriteDiffSnapshot(gitRef string, excludes []string) (string, func(), error) {
 	var (
 		fullDiff string
 		err      error
 	)
 	if git.IsRange(gitRef) {
-		fullDiff, err = git.GetRangeDiff(repoPath, gitRef, excludes...)
+		fullDiff, err = git.GetRangeDiff(b.repoPath, gitRef, excludes...)
 	} else {
-		fullDiff, err = git.GetDiff(repoPath, gitRef, excludes...)
+		fullDiff, err = git.GetDiff(b.repoPath, gitRef, excludes...)
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("capture diff: %w", err)
@@ -186,45 +210,194 @@ func WriteDiffSnapshot(repoPath, gitRef string, excludes []string) (string, func
 	if fullDiff == "" {
 		return "", nil, fmt.Errorf("diff is empty")
 	}
-	return writeExternalDiffSnapshot(fullDiff)
+	return b.writeExternalDiffSnapshot(fullDiff)
 }
 
-func writeExternalDiffSnapshot(diff string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "roborev-snapshot-*")
+func (b *Builder) writeExternalDiffSnapshot(diff string) (string, func(), error) {
+	snapshotRoot, err := config.ResolveSnapshotDir(b.repoPath)
 	if err != nil {
+		return "", nil, fmt.Errorf("resolve snapshot dir: %w", err)
+	}
+	if err := validateSnapshotRoot(b.repoPath, snapshotRoot); err != nil {
+		return "", nil, err
+	}
+	if err := ensureSnapshotRootIgnored(b.repoPath, snapshotRoot); err != nil {
+		return "", nil, fmt.Errorf("ensure snapshot dir ignored: %w", err)
+	}
+	if err := os.MkdirAll(snapshotRoot, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create snapshot root: %w", err)
+	}
+	if err := validateSnapshotRoot(b.repoPath, snapshotRoot); err != nil {
+		return "", nil, err
+	}
+	snapshotLifecycleMu.Lock()
+	dir, err := os.MkdirTemp(snapshotRoot, "roborev-snapshot-*")
+	if err != nil {
+		snapshotLifecycleMu.Unlock()
 		return "", nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
+	if err := writeSnapshotMarker(dir); err != nil {
+		os.RemoveAll(dir)
+		snapshotLifecycleMu.Unlock()
+		return "", nil, fmt.Errorf("write snapshot marker: %w", err)
+	}
+	unregister := registerActiveSnapshot(dir)
+	snapshotLifecycleMu.Unlock()
 	diffFile := dir + string(os.PathSeparator) + "roborev-snapshot-content.diff"
 	f, err := os.OpenFile(diffFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		unregister()
 		os.RemoveAll(dir)
 		return "", nil, fmt.Errorf("create snapshot: %w", err)
 	}
 	_, writeErr := f.WriteString(diff)
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {
+		unregister()
 		os.RemoveAll(dir)
 		if writeErr != nil {
 			return "", nil, fmt.Errorf("write snapshot: %w", writeErr)
 		}
 		return "", nil, fmt.Errorf("close snapshot: %w", closeErr)
 	}
-	return diffFile, func() { os.RemoveAll(dir) }, nil
+	return diffFile, func() {
+		os.RemoveAll(dir)
+		unregister()
+	}, nil
+}
+
+func writeSnapshotMarker(dir string) error {
+	return os.WriteFile(filepath.Join(dir, snapshotMarkerFile), []byte("roborev snapshot\n"), 0o600)
+}
+
+func registerActiveSnapshot(dir string) func() {
+	activeSnapshotDirs.Store(dir, struct{}{})
+	return func() {
+		activeSnapshotDirs.Delete(dir)
+	}
+}
+
+func isActiveSnapshotLocked(dir string) bool {
+	_, ok := activeSnapshotDirs.Load(dir)
+	return ok
+}
+
+func snapshotIsActive(dir string) bool {
+	snapshotLifecycleMu.Lock()
+	defer snapshotLifecycleMu.Unlock()
+	return isActiveSnapshotLocked(dir)
+}
+
+func validateSnapshotRoot(repoPath, snapshotRoot string) error {
+	if err := git.ValidateRepoLocalPathNoSymlinks(repoPath, snapshotRoot); err != nil {
+		return fmt.Errorf("validate snapshot dir: %w", err)
+	}
+	if err := git.EnsureNoTrackedFilesUnder(repoPath, snapshotRoot); err != nil {
+		return fmt.Errorf("validate snapshot dir: %w", err)
+	}
+	return nil
+}
+
+func ensureSnapshotRootIgnored(repoPath, snapshotRoot string) error {
+	pattern, probe, err := git.IgnorePatternForDir(repoPath, snapshotRoot)
+	if err != nil {
+		return err
+	}
+	ignored, err := git.CheckIgnoreNoIndex(repoPath, probe)
+	if err != nil {
+		return err
+	}
+	if ignored {
+		return nil
+	}
+	if err := git.EnsureLocalExcludePattern(repoPath, pattern); err != nil {
+		return err
+	}
+	ignored, err = git.CheckIgnoreNoIndex(repoPath, probe)
+	if err != nil {
+		return err
+	}
+	if !ignored {
+		return fmt.Errorf("snapshot dir %s is still not ignored after updating git exclude", snapshotRoot)
+	}
+	return nil
+}
+
+// CleanupStaleSnapshots removes old roborev snapshot directories from the
+// repo-local snapshot root. It is best-effort cleanup for daemon crashes or
+// process exits that happen before per-job cleanup runs.
+func (b *Builder) CleanupStaleSnapshots(olderThan time.Duration) error {
+	if olderThan <= 0 {
+		olderThan = DefaultStaleSnapshotAge
+	}
+	snapshotRoot, err := config.ResolveSnapshotDir(b.repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve snapshot dir: %w", err)
+	}
+	if err := validateSnapshotRoot(b.repoPath, snapshotRoot); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(snapshotRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read snapshot root: %w", err)
+	}
+	cutoff := time.Now().Add(-olderThan)
+	var errs []error
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "roborev-snapshot-") {
+			continue
+		}
+		path := filepath.Join(snapshotRoot, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stat snapshot dir %s: %w", path, err))
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if snapshotIsActive(path) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(path, snapshotMarkerFile)); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("stat snapshot marker %s: %w", path, err))
+			continue
+		}
+		hasTrackedFiles, err := git.HasTrackedFilesUnder(b.repoPath, path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("check tracked files under snapshot dir %s: %w", path, err))
+			continue
+		}
+		if hasTrackedFiles {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, fmt.Errorf("remove stale snapshot dir %s: %w", path, err))
+			continue
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // BuildDirtyWithSnapshot builds a dirty review prompt, writing the diff to a snapshot file
 // when it's too large to inline.
-func (b *Builder) BuildDirtyWithSnapshot(repoPath, diff string, repoID int64, contextCount int, agentName, reviewType, minSeverity string) (SnapshotResult, error) {
-	p, err := b.BuildDirty(repoPath, diff, repoID, contextCount, agentName, reviewType, minSeverity)
+func (b *Builder) BuildDirtyWithSnapshot(diff string, contextCount int, agentName, reviewType, minSeverity string) (SnapshotResult, error) {
+	p, err := b.BuildDirty(diff, contextCount, agentName, reviewType, minSeverity)
 	if err != nil {
 		return SnapshotResult{}, err
 	}
 	if strings.Contains(p, dirtyTruncatedDiffMarker) && len(diff) > 0 {
-		diffFile, cleanup, snapErr := writeExternalDiffSnapshot(diff)
+		diffFile, cleanup, snapErr := b.writeExternalDiffSnapshot(diff)
 		if snapErr != nil {
 			return SnapshotResult{}, fmt.Errorf("dirty diff snapshot: %w", snapErr)
 		}
-		p, err = fitDirtySnapshotReference(p, diffFile, b.resolveMaxPromptSize(repoPath))
+		p, err = fitDirtySnapshotReference(p, diffFile, b.resolveMaxPromptSize())
 		if err != nil {
 			cleanup()
 			return SnapshotResult{}, err
@@ -237,19 +410,19 @@ func (b *Builder) BuildDirtyWithSnapshot(repoPath, diff string, repoID int64, co
 // BuildDirty constructs a review prompt for uncommitted (dirty) changes.
 // The diff is provided directly since it was captured at enqueue time.
 // reviewType selects the system prompt variant (e.g., "security"); any default alias (see config.IsDefaultReviewType) uses the standard prompt.
-func (b *Builder) BuildDirty(repoPath, diff string, repoID int64, contextCount int, agentName, reviewType, minSeverity string) (string, error) {
-	ctx := b.newPromptBuildContext(repoPath, agentName, reviewType, minSeverity, "dirty", optionalSectionsView{})
+func (b *Builder) BuildDirty(diff string, contextCount int, agentName, reviewType, minSeverity string) (string, error) {
+	ctx := b.newPromptBuildContext(agentName, reviewType, minSeverity, "dirty", optionalSectionsView{})
 
 	// Add project-specific guidelines if configured
-	if repoCfg, err := config.LoadRepoConfig(repoPath); err == nil && repoCfg != nil {
+	if repoCfg, err := config.LoadRepoConfig(b.repoPath); err == nil && repoCfg != nil {
 		ctx.optional.ProjectGuidelines = buildProjectGuidelinesSectionView(repoCfg.ReviewGuidelines)
 	}
 
 	// Get previous reviews for context (use HEAD as reference point)
 	if contextCount > 0 && b.db != nil {
-		headSHA, err := git.ResolveSHA(repoPath, "HEAD")
+		headSHA, err := git.ResolveSHA(b.repoPath, "HEAD")
 		if err == nil {
-			contexts, err := b.getPreviousReviewContexts(repoPath, headSHA, contextCount)
+			contexts, err := b.getPreviousReviewContexts(headSHA, contextCount)
 			if err == nil && len(contexts) > 0 {
 				ctx.optional.PreviousReviews = orderedPreviousReviewViews(contexts)
 			}
@@ -445,7 +618,7 @@ type promptBuildContext struct {
 	promptCap      int
 }
 
-func (b *Builder) newPromptBuildContext(repoPath, agentName, reviewType, minSeverity, defaultPromptType string, optional optionalSectionsView) promptBuildContext {
+func (b *Builder) newPromptBuildContext(agentName, reviewType, minSeverity, defaultPromptType string, optional optionalSectionsView) promptBuildContext {
 	promptType := defaultPromptType
 	if !config.IsDefaultReviewType(reviewType) {
 		promptType = reviewType
@@ -453,7 +626,7 @@ func (b *Builder) newPromptBuildContext(repoPath, agentName, reviewType, minSeve
 	if promptType == config.ReviewTypeDesign {
 		promptType = "design-review"
 	}
-	promptCap := b.resolveMaxPromptSize(repoPath)
+	promptCap := b.resolveMaxPromptSize()
 	requiredPrefix := GetSystemPrompt(agentName, promptType) + "\n"
 	if inst := config.SeverityInstruction(minSeverity); inst != "" {
 		requiredPrefix += inst + "\n"
@@ -772,12 +945,12 @@ func selectRichestRangePromptView(limit int, view TemplateContext, variants []di
 }
 
 // buildSinglePrompt constructs a prompt for a single commit
-func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextCount int, agentName, reviewType string, opts buildOpts) (string, error) {
-	ctx := b.newPromptBuildContext(repoPath, agentName, reviewType, opts.minSeverity, "review", defaultOptionalSections(repoPath, opts.additionalContext))
+func (b *Builder) buildSinglePrompt(sha string, contextCount int, agentName, reviewType string, opts buildOpts) (string, error) {
+	ctx := b.newPromptBuildContext(agentName, reviewType, opts.minSeverity, "review", defaultOptionalSections(b.repoPath, opts.additionalContext))
 
 	// Get previous reviews if requested
 	if contextCount > 0 && b.db != nil {
-		contexts, err := b.getPreviousReviewContexts(repoPath, sha, contextCount)
+		contexts, err := b.getPreviousReviewContexts(sha, contextCount)
 		if err == nil && len(contexts) > 0 {
 			ctx.optional.PreviousReviews = orderedPreviousReviewViews(contexts)
 		}
@@ -790,7 +963,7 @@ func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextC
 	shortSHA := git.ShortSHA(sha)
 
 	// Get commit info
-	info, err := git.GetCommitInfo(repoPath, sha)
+	info, err := git.GetCommitInfo(b.repoPath, sha)
 	if err != nil {
 		return "", fmt.Errorf("get commit info: %w", err)
 	}
@@ -818,10 +991,10 @@ func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextC
 		return "", err
 	}
 
-	excludes := b.resolveExcludes(repoPath, reviewType)
+	excludes := b.resolveExcludes(reviewType)
 	bodyLimit := max(0, ctx.promptCap-len(ctx.requiredPrefix))
 	diffLimit := max(0, bodyLimit-len(currentRequired)-len(currentOverflow)-len(emptyDiffBlock))
-	diff, truncated, err := git.GetDiffLimited(repoPath, sha, diffLimit, excludes...)
+	diff, truncated, err := git.GetDiffLimited(b.repoPath, sha, diffLimit, excludes...)
 	if err != nil {
 		return "", fmt.Errorf("get diff: %w", err)
 	}
@@ -887,14 +1060,14 @@ func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextC
 }
 
 // buildRangePrompt constructs a prompt for a commit range
-func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, contextCount int, agentName, reviewType string, opts buildOpts) (string, error) {
-	ctx := b.newPromptBuildContext(repoPath, agentName, reviewType, opts.minSeverity, "range", defaultOptionalSections(repoPath, opts.additionalContext))
+func (b *Builder) buildRangePrompt(rangeRef string, contextCount int, agentName, reviewType string, opts buildOpts) (string, error) {
+	ctx := b.newPromptBuildContext(agentName, reviewType, opts.minSeverity, "range", defaultOptionalSections(b.repoPath, opts.additionalContext))
 
 	// Get previous reviews from before the range start
 	if contextCount > 0 && b.db != nil {
-		startSHA, err := git.GetRangeStart(repoPath, rangeRef)
+		startSHA, err := git.GetRangeStart(b.repoPath, rangeRef)
 		if err == nil {
-			contexts, err := b.getPreviousReviewContexts(repoPath, startSHA, contextCount)
+			contexts, err := b.getPreviousReviewContexts(startSHA, contextCount)
 			if err == nil && len(contexts) > 0 {
 				ctx.optional.PreviousReviews = orderedPreviousReviewViews(contexts)
 			}
@@ -905,7 +1078,7 @@ func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, cont
 	ctx.optional.PreviousAttempts = previousAttemptViewsFromContexts(b.previousAttemptContexts(rangeRef))
 
 	// Get commits in range
-	commits, err := git.GetRangeCommits(repoPath, rangeRef)
+	commits, err := git.GetRangeCommits(b.repoPath, rangeRef)
 	if err != nil {
 		return "", fmt.Errorf("get range commits: %w", err)
 	}
@@ -917,7 +1090,7 @@ func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, cont
 	entries := make([]commitRangeEntryView, 0, len(commits))
 	for _, commitSHA := range commits {
 		short := git.ShortSHA(commitSHA)
-		info, err := git.GetCommitInfo(repoPath, commitSHA)
+		info, err := git.GetCommitInfo(b.repoPath, commitSHA)
 		if err == nil {
 			entries = append(entries, commitRangeEntryView{Commit: short, Subject: escapeXML(info.Subject)})
 			continue
@@ -942,10 +1115,10 @@ func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, cont
 		return "", err
 	}
 
-	excludes := b.resolveExcludes(repoPath, reviewType)
+	excludes := b.resolveExcludes(reviewType)
 	bodyLimit := max(0, ctx.promptCap-len(ctx.requiredPrefix))
 	diffLimit := max(0, bodyLimit-len(currentRequiredText)-len(currentOverflowText)-len(emptyDiffBlock))
-	diff, truncated, err := git.GetRangeDiffLimited(repoPath, rangeRef, diffLimit, excludes...)
+	diff, truncated, err := git.GetRangeDiffLimited(b.repoPath, rangeRef, diffLimit, excludes...)
 	if err != nil {
 		return "", fmt.Errorf("get range diff: %w", err)
 	}
@@ -1094,9 +1267,9 @@ func (b *Builder) previousAttemptContexts(gitRef string) []reviewAttemptContext 
 }
 
 // getPreviousReviewContexts gets the N commits before the target and looks up their reviews and responses
-func (b *Builder) getPreviousReviewContexts(repoPath, sha string, count int) ([]HistoricalReviewContext, error) {
+func (b *Builder) getPreviousReviewContexts(sha string, count int) ([]HistoricalReviewContext, error) {
 	// Get parent commits from git
-	parentSHAs, err := git.GetParentCommits(repoPath, sha, count)
+	parentSHAs, err := git.GetParentCommits(b.repoPath, sha, count)
 	if err != nil {
 		return nil, fmt.Errorf("get parent commits: %w", err)
 	}
@@ -1133,8 +1306,8 @@ func (b *Builder) lookupReviewContexts(shas []string, skipMissing bool) []Histor
 
 // BuildSimple constructs a simpler prompt without database context
 func BuildSimple(repoPath, sha, agentName string) (string, error) {
-	b := &Builder{}
-	return b.Build(repoPath, sha, 0, 0, agentName, "", "")
+	b := NewBuilder(nil).ForRepo(repoPath, 0)
+	return b.Build(sha, 0, agentName, "", "")
 }
 
 const PreviousAttemptsHeader = `
@@ -1199,14 +1372,14 @@ func FormatUserComments(comments []storage.Response) string {
 // BuildAddressPrompt constructs a prompt for addressing review findings.
 // When minSeverity is non-empty, a severity filtering instruction is
 // injected before the findings section.
-func (b *Builder) BuildAddressPrompt(repoPath string, review *storage.Review, previousAttempts []storage.Response, minSeverity string) (string, error) {
+func (b *Builder) BuildAddressPrompt(review *storage.Review, previousAttempts []storage.Response, minSeverity string) (string, error) {
 	view := addressPromptView{
 		SeverityFilter: config.SeverityInstruction(minSeverity),
 		ReviewFindings: review.Output,
 		JobID:          review.JobID,
 	}
 
-	if repoCfg, err := config.LoadRepoConfig(repoPath); err == nil && repoCfg != nil {
+	if repoCfg, err := config.LoadRepoConfig(b.repoPath); err == nil && repoCfg != nil {
 		view.ProjectGuidelines = buildProjectGuidelinesSectionView(repoCfg.ReviewGuidelines)
 	}
 
@@ -1243,7 +1416,7 @@ func (b *Builder) BuildAddressPrompt(repoPath string, review *storage.Review, pr
 	}
 
 	if review.Job != nil && review.Job.GitRef != "" && review.Job.GitRef != "dirty" {
-		diff, err := git.GetDiff(repoPath, review.Job.GitRef)
+		diff, err := git.GetDiff(b.repoPath, review.Job.GitRef)
 		if err == nil && len(diff) > 0 && len(diff) < MaxPromptSize/2 {
 			view.OriginalDiff = diff
 			if !strings.HasSuffix(view.OriginalDiff, "\n") {

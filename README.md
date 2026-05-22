@@ -160,10 +160,13 @@ Create `.roborev.toml` in your repo:
 
 ```toml
 agent = "claude-code"
+snapshot_dir = ".roborev"
 review_guidelines = """
 Project-specific review instructions here.
 """
 ```
+
+`snapshot_dir` must be repo-relative. `roborev init` ensures it is ignored in `.gitignore`; snapshot creation also adds a local `.git/info/exclude` fallback for existing checkouts whose ignore setup is stale.
 
 See [configuration guide](https://roborev.io/configuration/) for all options.
 

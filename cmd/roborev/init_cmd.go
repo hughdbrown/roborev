@@ -64,7 +64,12 @@ func initCmd() *cobra.Command {
 				}
 			}
 
-			// 4. Install hooks (post-commit + post-rewrite)
+			// 4. Ensure the repo-local snapshot directory stays untracked.
+			if err := ensureSnapshotDirIgnored(root); err != nil {
+				return fmt.Errorf("ensure snapshot dir gitignored: %w", err)
+			}
+
+			// 5. Install hooks (post-commit + post-rewrite)
 			if err := git.EnsureAbsoluteHooksPath(root); err != nil {
 				return fmt.Errorf("normalize hooks path: %w", err)
 			}
@@ -82,7 +87,7 @@ func initCmd() *cobra.Command {
 				fmt.Printf("  Warning: %v\n", err)
 			}
 
-			// 5. Start daemon (or just register if --no-daemon)
+			// 6. Start daemon (or just register if --no-daemon)
 			var initIncomplete bool
 			if noDaemon {
 				// Try to register with an already-running daemon, but don't start one
@@ -110,7 +115,7 @@ func initCmd() *cobra.Command {
 				}
 			}
 
-			// 5. Success message
+			// 7. Success message
 			fmt.Println()
 			if initIncomplete {
 				fmt.Println("Setup incomplete: repo was not registered with the daemon.")
@@ -135,4 +140,31 @@ func initCmd() *cobra.Command {
 	cmd.AddCommand(ghActionCmd())
 
 	return cmd
+}
+
+func ensureSnapshotDirIgnored(root string) error {
+	snapshotDir, err := config.ResolveSnapshotDir(root)
+	if err != nil {
+		return err
+	}
+	if err := git.ValidateRepoLocalPathNoSymlinks(root, snapshotDir); err != nil {
+		return err
+	}
+	if err := git.EnsureNoTrackedFilesUnder(root, snapshotDir); err != nil {
+		return err
+	}
+	pattern, probe, err := git.IgnorePatternForDir(root, snapshotDir)
+	if err != nil {
+		return err
+	}
+	// Respect broader existing rules, e.g. .roborev/ or var/, before appending
+	// roborev's explicit snapshot directory entry.
+	ignored, err := git.CheckIgnoreNoIndex(root, probe)
+	if err != nil {
+		return err
+	}
+	if ignored {
+		return nil
+	}
+	return git.AppendIgnorePatternFile(filepath.Join(root, ".gitignore"), pattern)
 }

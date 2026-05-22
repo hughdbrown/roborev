@@ -390,7 +390,10 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	// Build the prompt (or use pre-stored prompt for task/compact jobs).
 	// Create a per-job builder with the snapshotted config so exclude
 	// patterns are resolved consistently.
-	pb := prompt.NewBuilderWithConfig(wp.db, cfg)
+	pb := prompt.NewBuilderWithConfig(wp.db, cfg).ForRepo(effectiveRepoPath, job.RepoID)
+	if err := pb.CleanupStaleSnapshots(prompt.DefaultStaleSnapshotAge); err != nil {
+		log.Printf("[%s] Warning: cleanup stale snapshots for job %d: %v", workerID, job.ID, err)
+	}
 	var reviewPrompt string
 	var promptToPersist string
 	storedPromptValue := job.Prompt
@@ -445,7 +448,7 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 
 		if job.DiffContent != nil {
 			// Dirty job - use pre-captured diff
-			dirtyResult, dirtyErr := pb.BuildDirtyWithSnapshot(effectiveRepoPath, *job.DiffContent, job.RepoID, cfg.ReviewContextCount, job.Agent, job.ReviewType, minSev)
+			dirtyResult, dirtyErr := pb.BuildDirtyWithSnapshot(*job.DiffContent, cfg.ReviewContextCount, job.Agent, job.ReviewType, minSev)
 			if dirtyResult.Cleanup != nil {
 				defer dirtyResult.Cleanup()
 			}
@@ -458,8 +461,7 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 				effectiveRepoPath, cfg, job.ReviewType,
 			)
 			snapResult, snapErr := pb.BuildWithSnapshot(
-				effectiveRepoPath, job.GitRef, job.RepoID,
-				cfg.ReviewContextCount, job.Agent,
+				job.GitRef, cfg.ReviewContextCount, job.Agent,
 				job.ReviewType, minSev, excludes,
 			)
 			if snapResult.Cleanup != nil {
@@ -1122,9 +1124,8 @@ func preparePrebuiltPrompt(
 	if !strings.Contains(reviewPrompt, prompt.DiffFilePathPlaceholder) {
 		return reviewPrompt, nil, nil
 	}
-	diffFile, cleanup, err := prompt.WriteDiffSnapshot(
-		repoPath, job.GitRef, excludes,
-	)
+	builder := prompt.NewBuilder(nil).ForRepo(repoPath, job.RepoID)
+	diffFile, cleanup, err := builder.WriteDiffSnapshot(job.GitRef, excludes)
 	if err != nil {
 		return "", nil, fmt.Errorf("prepare diff snapshot for prebuilt prompt: %w", err)
 	}

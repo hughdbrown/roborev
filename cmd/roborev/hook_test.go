@@ -456,6 +456,144 @@ func TestInitNoDaemonWithAgentCreatesCommentedRepoConfig(t *testing.T) {
 	}
 }
 
+func TestInitNoDaemonEnsuresDefaultSnapshotDirGitignored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows due to shell script stubs")
+	}
+
+	repo := initNoDaemonSetup(t)
+	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+
+	cmd := initCmd()
+	cmd.SetArgs([]string{"--no-daemon"})
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(repo.Root, ".gitignore"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "# roborev snapshots\n/.roborev/\n")
+
+	check := exec.Command("git", "-C", repo.Root, "check-ignore", "--quiet", "--no-index", ".roborev/roborev-snapshot-x/file.diff")
+	require.NoError(t, check.Run())
+}
+
+func TestInitNoDaemonEnsuresConfiguredSnapshotDirGitignored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows due to shell script stubs")
+	}
+
+	repo := initNoDaemonSetup(t)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repo.Root, ".roborev.toml"),
+		[]byte("snapshot_dir = \"var/roborev\"\n"),
+		0o644,
+	))
+	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+
+	cmd := initCmd()
+	cmd.SetArgs([]string{"--no-daemon"})
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(repo.Root, ".gitignore"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "# roborev snapshots\n/var/roborev/\n")
+
+	check := exec.Command("git", "-C", repo.Root, "check-ignore", "--quiet", "--no-index", "var/roborev/roborev-snapshot-x/file.diff")
+	require.NoError(t, check.Run())
+}
+
+func TestInitNoDaemonLeavesExistingSnapshotIgnoreRuleAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows due to shell script stubs")
+	}
+
+	repo := initNoDaemonSetup(t)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repo.Root, ".gitignore"),
+		[]byte(".roborev/\n"),
+		0o644,
+	))
+	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+
+	cmd := initCmd()
+	cmd.SetArgs([]string{"--no-daemon"})
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(repo.Root, ".gitignore"))
+	require.NoError(t, err)
+	assert.Equal(t, ".roborev/\n", string(data))
+}
+
+func TestInitNoDaemonRefusesTrackedSnapshotDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows due to shell script stubs")
+	}
+
+	repo := initNoDaemonSetup(t)
+	repo.Config("user.email", testutil.GitUserEmail)
+	repo.Config("user.name", testutil.GitUserName)
+	repo.WriteFile(".roborev/tracked.txt", "tracked\n")
+	repo.RunGit("add", "-f", ".roborev/tracked.txt")
+	repo.RunGit("commit", "-m", "track roborev dir")
+	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+
+	cmd := initCmd()
+	cmd.SetArgs([]string{"--no-daemon"})
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tracked files")
+}
+
+func TestInitNoDaemonRefusesSnapshotDirSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows due to symlink semantics")
+	}
+
+	repo := initNoDaemonSetup(t)
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(repo.Root, ".roborev")))
+	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+
+	cmd := initCmd()
+	cmd.SetArgs([]string{"--no-daemon"})
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlinks")
+}
+
+func TestInitNoDaemonRefusesGitignoreSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows due to symlink semantics")
+	}
+
+	repo := initNoDaemonSetup(t)
+	target := filepath.Join(repo.Root, "target-ignore")
+	require.NoError(t, os.WriteFile(target, []byte(""), 0o644))
+	require.NoError(t, os.Symlink(target, filepath.Join(repo.Root, ".gitignore")))
+	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+
+	cmd := initCmd()
+	cmd.SetArgs([]string{"--no-daemon"})
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ".gitignore")
+	assert.Contains(t, err.Error(), "symlink")
+}
+
 func TestInstallHookFromLinkedWorktree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix worktree semantics")
