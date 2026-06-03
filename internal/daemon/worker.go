@@ -618,7 +618,12 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	// Tee raw agent output to a per-job log file on disk. The writer retries
 	// transient filesystem failures so resource pressure does not permanently
 	// disable logging for the rest of the job.
-	jobLog := newJobLogWriter(job.ID)
+	var jobLog *jobLogWriter
+	if shouldAppendReviewJobLog(job) {
+		jobLog = newAppendingJobLogWriter(job.ID)
+	} else {
+		jobLog = newJobLogWriter(job.ID)
+	}
 	defer func() {
 		if err := jobLog.Close(); err != nil {
 			log.Printf("[%s] Warning: close job log for job %d: %v", workerID, job.ID, err)
@@ -802,6 +807,10 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		Findings:     output,
 		WorktreePath: eventWorktreePath,
 	})
+}
+
+func shouldAppendReviewJobLog(job *storage.ReviewJob) bool {
+	return job.Source == "auto_design"
 }
 
 func (wp *WorkerPool) autoClosePassingReview(workerID string, job *storage.ReviewJob, output string) {
