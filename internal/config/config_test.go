@@ -324,6 +324,136 @@ func TestLoadRepoConfigMissing(t *testing.T) {
 	}, "Expected nil config when file doesn't exist")
 }
 
+// TestLoadRepoConfigWorktreeFallback verifies that a .roborev.toml living only
+// in the main checkout (e.g. gitignored, so absent from a linked worktree's
+// working tree) is still loaded when LoadRepoConfig is called against the
+// worktree directory.
+func TestLoadRepoConfigWorktreeFallback(t *testing.T) {
+	main := t.TempDir()
+	execGit(t, main, "init")
+	execGit(t, main, "config", "user.email", "t@example.com")
+	execGit(t, main, "config", "user.name", "t")
+	writeTestFile(t, main, "base.txt", "base\n")
+	execGit(t, main, "add", ".")
+	execGit(t, main, "commit", "-m", "init")
+
+	// Config exists only in the main checkout and is gitignored, so it is
+	// untracked and will not appear in a worktree's working tree.
+	writeTestFile(t, main, ".gitignore", ".roborev.toml\n")
+	writeRepoConfigStr(t, main, `agent = "claude-code"`)
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	execGit(t, main, "worktree", "add", wt, "HEAD")
+
+	// Sanity: the worktree really lacks its own config.
+	_, statErr := os.Stat(filepath.Join(wt, ".roborev.toml"))
+	require.True(t, os.IsNotExist(statErr), "worktree should not contain .roborev.toml")
+
+	cfg, err := LoadRepoConfig(wt)
+	require.NoError(t, err)
+	require.NotNil(t, cfg, "expected fallback to main checkout config")
+	assert.Equal(t, "claude-code", cfg.Agent)
+}
+
+// TestLoadRepoConfigWorktreeNoFallbackForTracked verifies that a tracked
+// .roborev.toml in the main checkout is NOT inherited by a worktree on a
+// branch that lacks it. A tracked file is branch-specific, so the worktree's
+// own absence must win.
+func TestLoadRepoConfigWorktreeNoFallbackForTracked(t *testing.T) {
+	main := t.TempDir()
+	execGit(t, main, "init")
+	execGit(t, main, "config", "user.email", "t@example.com")
+	execGit(t, main, "config", "user.name", "t")
+	writeTestFile(t, main, "base.txt", "base\n")
+	execGit(t, main, "add", ".")
+	execGit(t, main, "commit", "-m", "init")
+
+	// Create the worktree from a commit that has no .roborev.toml, then add a
+	// tracked .roborev.toml only on the main checkout's branch.
+	wt := filepath.Join(t.TempDir(), "wt")
+	execGit(t, main, "worktree", "add", "-b", "feature", wt, "HEAD")
+
+	writeRepoConfigStr(t, main, `agent = "claude-code"`)
+	execGit(t, main, "add", ".roborev.toml")
+	execGit(t, main, "commit", "-m", "add config on main")
+
+	// The worktree branch never received the tracked file, so it must not
+	// inherit the main checkout's branch copy.
+	_, statErr := os.Stat(filepath.Join(wt, ".roborev.toml"))
+	require.True(t, os.IsNotExist(statErr), "worktree should not contain .roborev.toml")
+
+	cfg, err := LoadRepoConfig(wt)
+	require.NoError(t, err)
+	assert.Nil(t, cfg, "tracked main config must not leak into a worktree on a branch that lacks it")
+}
+
+// TestLoadRepoConfigWorktreeLocalWins verifies that a worktree's own
+// .roborev.toml takes precedence over the main checkout's config.
+func TestLoadRepoConfigWorktreeLocalWins(t *testing.T) {
+	main := t.TempDir()
+	execGit(t, main, "init")
+	execGit(t, main, "config", "user.email", "t@example.com")
+	execGit(t, main, "config", "user.name", "t")
+	writeTestFile(t, main, "base.txt", "base\n")
+	execGit(t, main, "add", ".")
+	execGit(t, main, "commit", "-m", "init")
+
+	writeTestFile(t, main, ".gitignore", ".roborev.toml\n")
+	writeRepoConfigStr(t, main, `agent = "codex"`)
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	execGit(t, main, "worktree", "add", wt, "HEAD")
+	writeRepoConfigStr(t, wt, `agent = "gemini"`)
+
+	cfg, err := LoadRepoConfig(wt)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "gemini", cfg.Agent, "worktree-local config should win over main")
+}
+
+// TestLoadRepoConfigSymlink verifies that a .roborev.toml that is a symlink to
+// a config file elsewhere is followed and loaded.
+func TestLoadRepoConfigSymlink(t *testing.T) {
+	target := t.TempDir()
+	writeTestFile(t, target, "shared.toml", `agent = "copilot"`)
+
+	repo := t.TempDir()
+	require.NoError(t, os.Symlink(
+		filepath.Join(target, "shared.toml"),
+		filepath.Join(repo, ".roborev.toml"),
+	))
+
+	cfg, err := LoadRepoConfig(repo)
+	require.NoError(t, err)
+	require.NotNil(t, cfg, "expected symlinked config to be loaded")
+	assert.Equal(t, "copilot", cfg.Agent)
+}
+
+// TestLoadRawRepoWorktreeFallback verifies that raw-config loading (used for
+// explicit-key detection) applies the same main-checkout fallback as
+// LoadRepoConfig when .roborev.toml exists only in the main checkout.
+func TestLoadRawRepoWorktreeFallback(t *testing.T) {
+	main := t.TempDir()
+	execGit(t, main, "init")
+	execGit(t, main, "config", "user.email", "t@example.com")
+	execGit(t, main, "config", "user.name", "t")
+	writeTestFile(t, main, "base.txt", "base\n")
+	execGit(t, main, "add", ".")
+	execGit(t, main, "commit", "-m", "init")
+
+	writeTestFile(t, main, ".gitignore", ".roborev.toml\n")
+	writeRepoConfigStr(t, main, "reuse_review_session_lookback = 5\n")
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	execGit(t, main, "worktree", "add", wt, "HEAD")
+
+	raw, err := LoadRawRepo(wt)
+	require.NoError(t, err)
+	require.NotNil(t, raw, "expected raw config to fall back to main checkout")
+	assert.True(t, IsKeyInTOMLFile(raw, "reuse_review_session_lookback"),
+		"explicit key should be detected via the main-checkout fallback")
+}
+
 func TestResolveJobTimeout(t *testing.T) {
 	tests := []struct {
 		name         string
