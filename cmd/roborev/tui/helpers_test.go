@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour/styles"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2/styles"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
@@ -310,7 +310,8 @@ func TestRenderMarkdownLinesPreservesLongProse(t *testing.T) {
 
 	var combined strings.Builder
 	for _, line := range lines {
-		combined.WriteString(stripTestANSI(line) + " ")
+		combined.WriteString(stripTestANSI(line))
+		combined.WriteByte(' ')
 	}
 	for _, word := range []string{"important", "word-wrapped", "truncated", "information", "rendered"} {
 		assert.Contains(t, combined.String(), word)

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/lipgloss/table"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
 	"github.com/mattn/go-runewidth"
 
 	"go.kenn.io/roborev/internal/storage"
@@ -211,7 +211,7 @@ func (m model) renderTasksView() string {
 	// Column widths: fixed columns get their natural size,
 	// flexible columns (Branch, Repo, Ref/Subject) absorb excess space.
 	bordersOn := m.colBordersOn
-	borderColor := lipgloss.AdaptiveColor{Light: "248", Dark: "242"}
+	borderColor := adaptiveColor("248", "242")
 
 	spacing := func(tableCol int, logCol int) int {
 		if logCol == tcolSel || tableCol == 0 {
@@ -352,12 +352,12 @@ func (m model) renderTasksView() string {
 
 			// Header row styling
 			if row == table.HeaderRow {
-				return s.Foreground(lipgloss.AdaptiveColor{Light: "242", Dark: "246"})
+				return s.Foreground(adaptiveColor("242", "246"))
 			}
 
 			// Selection highlighting
 			if row == selectedWindowIdx {
-				bg := lipgloss.AdaptiveColor{Light: "153", Dark: "24"}
+				bg := adaptiveColor("153", "24")
 				s = s.Background(bg)
 				if bordersOn {
 					s = s.BorderBackground(bg)
@@ -487,7 +487,8 @@ func (m model) renderPatchView() string {
 				strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++"):
 				display = metaStyle.Render(line)
 			}
-			b.WriteString("  " + display)
+			b.WriteString("  ")
+			b.WriteString(display)
 			b.WriteString("\x1b[K\n")
 		}
 
@@ -514,7 +515,9 @@ func (m model) renderPatchView() string {
 			display = string(rs)
 		}
 		display = display + strings.Repeat(" ", max(inputWidth-runewidth.StringWidth(display), 0))
-		b.WriteString(helpStyle.Render(label) + display + "\x1b[K\n")
+		b.WriteString(helpStyle.Render(label))
+		b.WriteString(display)
+		b.WriteString("\x1b[K\n")
 		b.WriteString(renderHelpTable([][]helpItem{
 			{{"enter", "save"}, {"esc", "cancel"}},
 		}, m.width))
