@@ -53,7 +53,6 @@ type ghPR struct {
 	Number      int        `json:"number"`
 	HeadRefOid  string     `json:"headRefOid"`
 	BaseRefName string     `json:"baseRefName"`
-	HeadRefName string     `json:"headRefName"`
 	Title       string     `json:"title"`
 	Author      ghPRAuthor `json:"author"`
 }
@@ -62,6 +61,7 @@ type panelPostTarget struct {
 	Open        bool
 	HeadSHA     string
 	BaseRefName string
+	AuthorLogin string
 }
 
 const (
@@ -90,7 +90,7 @@ type CIPoller struct {
 	gitCloneFn          func(ctx context.Context, ghRepo, targetPath string, env []string) error
 	mergeBaseFn         func(string, string, string) (string, error)
 	loadRepoConfigFn    func(string) (*config.RepoConfig, error)
-	buildReviewPromptFn func(string, string, int64, int, string, string, string, string, *config.Config) (string, error)
+	buildReviewPromptFn func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error)
 	postPRCommentFn     func(string, int, string) error
 	setCommitStatusFn   func(ghRepo, sha, state, description string) error
 	agentResolverFn     func(name string) (string, error)      // returns resolved agent name
@@ -124,8 +124,15 @@ func NewCIPoller(db *storage.DB, cfgGetter ConfigGetter, broadcaster Broadcaster
 	p.gitFetchPRHeadFn = gitFetchPRHead
 	p.mergeBaseFn = gitpkg.GetMergeBase
 	p.loadRepoConfigFn = loadCIRepoConfig
-	p.buildReviewPromptFn = func(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, additionalContext string, cfg *config.Config) (string, error) {
-		builder := prompt.NewBuilderWithConfig(p.db, cfg).ForRepo(repoPath, repoID)
+	// CI prompts deliberately carry no kata context. PR-creator trust does
+	// not extend to whoever controls the reviewed head SHA (any write
+	// collaborator can push to a same-repo PR branch), and GitHub's polling
+	// APIs expose no non-spoofable head-pusher signal to gate on, so kata
+	// task-ledger content stays out of CI prompts entirely (it could
+	// otherwise surface in publicly posted PR comments). Kata context is a
+	// local-review feature; the worker also skips it for CI jobs.
+	p.buildReviewPromptFn = func(ctx context.Context, repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, additionalContext string, cfg *config.Config) (string, error) {
+		builder := prompt.NewBuilderWithConfig(p.db, cfg).WithContext(ctx).ForRepo(repoPath, repoID)
 		return builder.BuildWithAdditionalContextAndDiffFile(
 			gitRef,
 			contextCount,
@@ -423,13 +430,20 @@ func (p *CIPoller) enqueuePanelRun(ctx context.Context, ghRepo string, pr ghPR, 
 	// no member already covers the design review type (F8, F12).
 	members = p.maybeAppendDesignMember(ctx, members, repo, repoCfg, cfg, mergeBase, pr.HeadRefOid)
 
-	memberOpts, synthOpts := p.buildPanelOpts(
+	memberOpts, synthOpts, err := p.buildPanelOpts(
+		ctx,
 		buildPanelOptsInput{
 			repo: repo, repoCfg: repoCfg, cfg: cfg, ghRepo: ghRepo, gitRef: gitRef,
-			prNumber: pr.Number, panelName: ciPanelName(repoCfg, cfg),
+			// Gate hooks on the PR base (target) branch: it is maintainer-
+			// controlled, unlike the fork-author-controlled head ref.
+			baseBranch: pr.BaseRefName,
+			prNumber:   pr.Number, panelName: ciPanelName(repoCfg, cfg),
 			prDiscussionContext: prDiscussionContext,
 			members:             members, synth: synth,
 		})
+	if err != nil {
+		return err
+	}
 
 	created, _, _, err := p.db.CreateCIPanelRun(ghRepo, pr.Number, pr.HeadRefOid, memberOpts, synthOpts)
 	if err != nil {
@@ -928,6 +942,7 @@ type buildPanelOptsInput struct {
 	cfg                 *config.Config
 	ghRepo              string
 	gitRef              string
+	baseBranch          string // PR base (target) branch, recorded for hook branch matching only (never Branch)
 	prNumber            int
 	panelName           string // config panel name ("" for the implicit matrix)
 	prDiscussionContext string
@@ -942,16 +957,21 @@ type buildPanelOptsInput struct {
 // blocked JobTypeSynthesis carrying the panel name and any synthesis backup.
 // CreateCIPanelRun stamps the shared panel_run_uuid and enforces the roles, so
 // PanelRunUUID is left empty here.
-func (p *CIPoller) buildPanelOpts(in buildPanelOptsInput) ([]storage.EnqueueOpts, storage.EnqueueOpts) {
+func (p *CIPoller) buildPanelOpts(ctx context.Context, in buildPanelOptsInput) ([]storage.EnqueueOpts, storage.EnqueueOpts, error) {
 	synthesisMinSeverity := resolveMinSeverity(in.cfg.CI.MinSeverity, in.repo.RootPath, in.ghRepo)
 	reviewMinSeverity := resolveCIReviewMinSeverity(in.repoCfg, in.cfg, in.ghRepo)
 	memberOpts := make([]storage.EnqueueOpts, 0, len(in.members))
 	for i, m := range in.members {
 		storedPrompt, err := p.callBuildReviewPrompt(
-			in.repo.RootPath, in.gitRef, in.repo.ID, in.cfg.ReviewContextCount,
+			ctx, in.repo.RootPath, in.gitRef, in.repo.ID, in.cfg.ReviewContextCount,
 			m.Agent, m.ReviewType, reviewMinSeverity, in.prDiscussionContext, in.cfg,
 		)
 		if err != nil {
+			// A canceled poller (Stop or shutdown) must abort the whole run
+			// rather than degrade it into jobs without stored prompts.
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, storage.EnqueueOpts{}, fmt.Errorf("prebuild prompt for %s#%d canceled: %w", in.ghRepo, in.prNumber, err)
+			}
 			log.Printf("CI poller: failed to prebuild prompt for %s#%d (member=%s, agent=%s): %v; enqueuing without stored prompt",
 				in.ghRepo, in.prNumber, m.Name, m.Agent, err)
 			storedPrompt = ""
@@ -960,6 +980,7 @@ func (p *CIPoller) buildPanelOpts(in buildPanelOptsInput) ([]storage.EnqueueOpts
 		memberOpts = append(memberOpts, storage.EnqueueOpts{
 			RepoID:                in.repo.ID,
 			GitRef:                in.gitRef,
+			CIBaseBranch:          in.baseBranch,
 			Agent:                 m.Agent,
 			Model:                 m.Model,
 			Provider:              m.Provider,
@@ -980,6 +1001,7 @@ func (p *CIPoller) buildPanelOpts(in buildPanelOptsInput) ([]storage.EnqueueOpts
 	synthOpts := storage.EnqueueOpts{
 		RepoID:       in.repo.ID,
 		GitRef:       in.gitRef,
+		CIBaseBranch: in.baseBranch,
 		Agent:        in.synth.Agent,
 		Model:        in.synth.Model,
 		Reasoning:    in.synth.Reasoning,
@@ -991,7 +1013,7 @@ func (p *CIPoller) buildPanelOpts(in buildPanelOptsInput) ([]storage.EnqueueOpts
 		PanelName:    in.panelName,
 		ClaimBlocked: true,
 	}
-	return memberOpts, synthOpts
+	return memberOpts, synthOpts, nil
 }
 
 func listCommitsInRange(repoPath, base, head string) ([]string, error) {
@@ -1526,7 +1548,6 @@ func (p *CIPoller) listOpenPRs(ctx context.Context, ghRepo string) ([]ghPR, erro
 			Number:      pr.Number,
 			HeadRefOid:  pr.HeadRefOID,
 			BaseRefName: pr.BaseRefName,
-			HeadRefName: pr.HeadRefName,
 			Title:       pr.Title,
 			Author:      ghPRAuthor{Login: pr.AuthorLogin},
 		})
@@ -2364,6 +2385,9 @@ func (p *CIPoller) retryAttemptPR(
 		Number:      attempt.PRNumber,
 		HeadRefOid:  headSHA,
 		BaseRefName: baseRefName,
+		// Preserve the author so kata trust gating in enqueuePanelRun does
+		// not fail closed for trusted authors on the retry path.
+		Author: ghPRAuthor{Login: target.AuthorLogin},
 	}, true
 }
 
@@ -2703,11 +2727,11 @@ func (p *CIPoller) callMergeBase(repoPath, baseRef, headRef string) (string, err
 	return gitpkg.GetMergeBase(repoPath, baseRef, headRef)
 }
 
-func (p *CIPoller) callBuildReviewPrompt(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, additionalContext string, cfg *config.Config) (string, error) {
+func (p *CIPoller) callBuildReviewPrompt(ctx context.Context, repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType, minSeverity, additionalContext string, cfg *config.Config) (string, error) {
 	if p.buildReviewPromptFn != nil {
-		return p.buildReviewPromptFn(repoPath, gitRef, repoID, contextCount, agentName, reviewType, minSeverity, additionalContext, cfg)
+		return p.buildReviewPromptFn(ctx, repoPath, gitRef, repoID, contextCount, agentName, reviewType, minSeverity, additionalContext, cfg)
 	}
-	builder := prompt.NewBuilderWithConfig(p.db, cfg).ForRepo(repoPath, repoID)
+	builder := prompt.NewBuilderWithConfig(p.db, cfg).WithContext(ctx).ForRepo(repoPath, repoID)
 	return builder.BuildWithAdditionalContextAndDiffFile(
 		gitRef,
 		contextCount,
@@ -2807,6 +2831,7 @@ func (p *CIPoller) panelPostTarget(
 		Open:        strings.EqualFold(pr.State, "open"),
 		HeadSHA:     pr.HeadRefOID,
 		BaseRefName: pr.BaseRefName,
+		AuthorLogin: pr.AuthorLogin,
 	}, nil
 }
 

@@ -468,3 +468,65 @@ func TestRunBatchIgnoresMalformedRepoConfig(t *testing.T) {
 	require.Equal(t, ResultDone, results[0].Status, "status=%q err=%q", results[0].Status, results[0].Error)
 	assert.Equal(t, "batch-agent", results[0].Agent)
 }
+
+// installFakeKata copies the test binary to dir as `kata` and points PATH and
+// ROBOREV_TEST_FAKE_KATA at it, so any kata CLI invocation deterministically
+// returns an open issue (see TestMain) instead of depending on whether the
+// developer machine has kata installed.
+func installFakeKata(t *testing.T) {
+	t.Helper()
+	self, err := os.Executable()
+	require.NoError(t, err)
+	data, err := os.ReadFile(self)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	name := "kata"
+	if runtime.GOOS == "windows" {
+		name = "kata.exe"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o755))
+	t.Setenv("ROBOREV_TEST_FAKE_KATA", "1")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRunBatch_NoKataContextFromUntrustedCheckout(t *testing.T) {
+	require := require.New(t)
+
+	// No t.Parallel: installFakeKata uses t.Setenv.
+	installFakeKata(t)
+	repo := testutil.NewTestRepoWithCommit(t)
+
+	// An untrusted PR head controls the checkout: it can both enable
+	// kata_context in .roborev.toml and reference kata issues in commit
+	// messages. Daemon-free CI must never resolve kata context.
+	require.NoError(os.WriteFile(
+		filepath.Join(repo.Root, ".roborev.toml"),
+		[]byte("[kata_context]\nmode = \"open\"\n"), 0o644))
+	require.NoError(os.WriteFile(
+		filepath.Join(repo.Root, ".kata.toml"),
+		[]byte("[project]\nname = \"victim\"\n"), 0o644))
+	repo.RunGit("add", "-A")
+	repo.RunGit("commit", "-m", "Sneaky change\n\nCloses: kata#abc4")
+	sha := repo.RevParse("HEAD")
+
+	captureAgent := &promptCapture{name: "capture"}
+	cfg := BatchConfig{
+		RepoPath:     repo.Root,
+		GitRef:       sha,
+		Agents:       []string{"capture"},
+		ReviewTypes:  []string{"review"},
+		GlobalConfig: &config.Config{},
+		AgentRegistry: map[string]agent.Agent{
+			"capture": captureAgent,
+		},
+	}
+
+	results := RunBatch(context.Background(), cfg)
+	require.Len(results, 1)
+	require.Equal(ResultDone, results[0].Status,
+		"status=%q err=%q", results[0].Status, results[0].Error)
+	assert.NotContains(t, captureAgent.lastPrompt, "Task Context (kata)",
+		"daemon-free CI must not include kata context from an untrusted checkout")
+	assert.NotContains(t, captureAgent.lastPrompt, "Secret kata body.",
+		"fake kata output must never reach the prompt")
+}

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1121,6 +1122,8 @@ func setupDiffExcludesGeneratedFilesTest(t *testing.T) (*TestRepo, string) {
 	repo.WriteFile(".beads/notes.md", "beads\n")
 	repo.WriteFile(".gocache/object", "cache\n")
 	repo.WriteFile(".cache/object", "cache\n")
+	repo.WriteFile(".kata.local.toml", "[server]\nurl = \"http://x\"\n")
+	repo.WriteFile(".kata.toml", "[project]\nname = \"demo\"\n")
 	repo.WriteFile("keep.txt", "keep\n")
 
 	repo.CommitAll("add files")
@@ -1133,6 +1136,9 @@ func TestGetDiffExcludesGeneratedFiles(t *testing.T) {
 	assertExcluded := func(t *testing.T, diff string) {
 		t.Helper()
 		require.Contains(t, diff, "keep.txt", "expected generated files filter to retain keep.txt")
+		require.Contains(t, diff, ".kata.toml", "expected committed kata binding to remain reviewable")
+		require.Contains(t, diff, ".kata.local.toml",
+			"a committed .kata.local.toml steers kata binding resolution and must stay reviewable")
 		require.NotContains(t, diff, ".beads/", "expected generated files filter to exclude .beads files")
 		require.NotContains(t, diff, ".gocache/", "expected generated files filter to exclude .gocache files")
 		require.NotContains(t, diff, ".cache/", "expected generated files filter to exclude .cache files")
@@ -2359,5 +2365,62 @@ func TestGetBranchBase(t *testing.T) {
 		repo.Run("config", "branch.feature.base", "main")
 
 		assert.Equal(t, "upstream/main", GetBranchBase(repo.Dir, "HEAD"))
+	})
+}
+
+func TestCtxVariantsHonorCancellation(t *testing.T) {
+	repo := NewTestRepoWithCommit(t)
+	sha := strings.TrimSpace(repo.Run("rev-parse", "HEAD"))
+	rangeRef := sha + ".." + sha
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"GetCommitInfoCtx", func() error { _, err := GetCommitInfoCtx(ctx, repo.Dir, sha); return err }},
+		{"GetFilesChangedCtx", func() error { _, err := GetFilesChangedCtx(ctx, repo.Dir, sha); return err }},
+		{"GetDiffLimitedCtx", func() error { _, _, err := GetDiffLimitedCtx(ctx, repo.Dir, sha, 1024); return err }},
+		{"GetRangeCommitsCtx", func() error { _, err := GetRangeCommitsCtx(ctx, repo.Dir, rangeRef); return err }},
+		{"GetRangeFilesChangedCtx", func() error { _, err := GetRangeFilesChangedCtx(ctx, repo.Dir, rangeRef); return err }},
+		{"GetRangeDiffLimitedCtx", func() error { _, _, err := GetRangeDiffLimitedCtx(ctx, repo.Dir, rangeRef, 1024); return err }},
+		{"GetParentCommitsCtx", func() error { _, err := GetParentCommitsCtx(ctx, repo.Dir, sha, 1); return err }},
+		{"ResolveSHACtx", func() error { _, err := ResolveSHACtx(ctx, repo.Dir, sha); return err }},
+		{"GetRangeStartCtx", func() error { _, err := GetRangeStartCtx(ctx, repo.Dir, rangeRef); return err }},
+		{"GetDiffCtx", func() error { _, err := GetDiffCtx(ctx, repo.Dir, sha); return err }},
+		{"GetRangeDiffCtx", func() error { _, err := GetRangeDiffCtx(ctx, repo.Dir, rangeRef); return err }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Error(t, tt.call(), "canceled context must abort the git call")
+		})
+	}
+}
+
+func TestGetDirtyDiffKataLocalToml(t *testing.T) {
+	t.Run("untracked local override is suppressed", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.WriteFile(".kata.local.toml", "[project]\nname = \"local\"\n")
+		repo.WriteFile("dirty.txt", "dirty\n")
+
+		diff, err := GetDirtyDiff(repo.Dir)
+		require.NoError(t, err)
+		assert.Contains(t, diff, "dirty.txt")
+		assert.NotContains(t, diff, ".kata.local.toml",
+			"an untracked local kata override must not leak into dirty review prompts")
+	})
+
+	t.Run("tracked local override modifications stay visible", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.WriteFile(".kata.local.toml", "[project]\nname = \"committed\"\n")
+		repo.CommitAll("track kata local override")
+		repo.WriteFile(".kata.local.toml", "[project]\nname = \"steered\"\n")
+
+		diff, err := GetDirtyDiff(repo.Dir)
+		require.NoError(t, err)
+		assert.Contains(t, diff, ".kata.local.toml",
+			"modifying a tracked .kata.local.toml must stay visible to dirty reviews")
+		assert.Contains(t, diff, "steered")
 	})
 }

@@ -955,6 +955,95 @@ func TestProcessJob_BuildsDirtyPromptFromPersistedDirtyFiles(t *testing.T) {
 	assert.Contains(t, capturedPrompt, "go.sum changed")
 }
 
+func TestProcessJob_BroadcastsBranchOnLifecycleEvents(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+
+	agentName := "branch-event-agent"
+	agent.Register(&agent.FakeAgent{
+		NameStr: agentName,
+		ReviewFn: func(_ context.Context, _, _, _ string, _ io.Writer) (string, error) {
+			return "No issues found.", nil
+		},
+	})
+	t.Cleanup(func() { agent.Unregister(agentName) })
+
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID:         tc.Repo.ID,
+		GitRef:         sha,
+		Branch:         "main",
+		Agent:          agentName,
+		Prompt:         "review body\n",
+		PromptPrebuilt: true,
+		JobType:        storage.JobTypeRange,
+	})
+	require.NoError(t, err)
+
+	claimed, err := tc.DB.ClaimJob(testWorkerID)
+	require.NoError(t, err)
+	require.Equal(t, job.ID, claimed.ID)
+	require.Equal(t, "main", claimed.Branch)
+
+	_, eventCh := tc.Broadcaster.Subscribe("")
+	tc.Pool.processJob(testWorkerID, claimed)
+
+	// review.started is non-terminal and was the event class that previously
+	// shipped without a branch, leaving branch-filtered hooks unable to fire.
+	started, ok := waitForEvent(t, eventCh, 2*time.Second)
+	require.True(t, ok, "expected review.started event")
+	require.Equal(t, "review.started", started.Type)
+	assert.Equal(t, "main", started.Branch, "review.started must carry the job branch for hook filtering")
+
+	terminal, ok := waitForEvent(t, eventCh, 2*time.Second)
+	require.True(t, ok, "expected a terminal review event")
+	assert.Equal(t, "main", terminal.Branch, "terminal review event must carry the job branch for hook filtering")
+}
+
+func TestProcessJob_BroadcastsCIBaseBranchOnLifecycleEvents(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+
+	agentName := "ci-branch-event-agent"
+	agent.Register(&agent.FakeAgent{
+		NameStr: agentName,
+		ReviewFn: func(_ context.Context, _, _, _ string, _ io.Writer) (string, error) {
+			return "No issues found.", nil
+		},
+	})
+	t.Cleanup(func() { agent.Unregister(agentName) })
+
+	// CI jobs leave Branch empty (so they never look like local work on the
+	// base branch) and record the PR base branch separately for hooks.
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID:         tc.Repo.ID,
+		GitRef:         sha,
+		CIBaseBranch:   "main",
+		Agent:          agentName,
+		Prompt:         "review body\n",
+		PromptPrebuilt: true,
+		JobType:        storage.JobTypeRange,
+	})
+	require.NoError(t, err)
+
+	claimed, err := tc.DB.ClaimJob(testWorkerID)
+	require.NoError(t, err)
+	require.Equal(t, job.ID, claimed.ID)
+	require.Empty(t, claimed.Branch, "CI jobs must not record a local branch")
+	require.Equal(t, "main", claimed.CIBaseBranch)
+
+	_, eventCh := tc.Broadcaster.Subscribe("")
+	tc.Pool.processJob(testWorkerID, claimed)
+
+	started, ok := waitForEvent(t, eventCh, 2*time.Second)
+	require.True(t, ok, "expected review.started event")
+	require.Equal(t, "review.started", started.Type)
+	assert.Equal(t, "main", started.Branch, "review.started must carry the CI base branch for hook filtering")
+
+	terminal, ok := waitForEvent(t, eventCh, 2*time.Second)
+	require.True(t, ok, "expected a terminal review event")
+	assert.Equal(t, "main", terminal.Branch, "terminal review event must carry the CI base branch for hook filtering")
+}
+
 func TestProcessJob_PromotedAutoDesignAppendsExistingClassifierLog(t *testing.T) {
 	setupTestEnv(t)
 	tc := newWorkerTestContext(t, 1)
@@ -1238,7 +1327,7 @@ func TestPreparePrebuiltPrompt_ReplacesDiffFilePlaceholder(t *testing.T) {
 	job := &storage.ReviewJob{ID: 73, Agent: "codex", GitRef: sha}
 
 	reviewPrompt, cleanup, err := preparePrebuiltPrompt(
-		tc.TmpDir,
+		context.Background(), tc.TmpDir,
 		prompt.SnapshotTarget{},
 		job,
 		"## Pull Request Discussion\n\n### Diff\n\nRead the diff from: `"+prompt.DiffFilePathPlaceholder+"`\n",
@@ -1263,7 +1352,7 @@ func TestPreparePrebuiltPrompt_RequotesDiffPathWithSingleQuote(t *testing.T) {
 	job := &storage.ReviewJob{ID: 74, Agent: "codex", GitRef: sha}
 
 	reviewPrompt, cleanup, err := preparePrebuiltPrompt(
-		repoPath,
+		context.Background(), repoPath,
 		prompt.SnapshotTarget{},
 		job,
 		"### Diff\n\nRead the diff from: `"+prompt.DiffFilePathPlaceholder+"`\n",
@@ -1289,7 +1378,7 @@ func TestPreparePrebuiltPrompt_AllowsUnsafeModeByStillWritingDiffFile(t *testing
 	job := &storage.ReviewJob{ID: 75, Agent: "codex", GitRef: sha}
 
 	reviewPrompt, cleanup, err := preparePrebuiltPrompt(
-		tc.TmpDir,
+		context.Background(), tc.TmpDir,
 		prompt.SnapshotTarget{},
 		job,
 		"### Diff\n\nRead the diff from: `"+prompt.DiffFilePathPlaceholder+"`\n",

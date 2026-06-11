@@ -1216,6 +1216,41 @@ func TestEnqueueJobWithPatchID(t *testing.T) {
 	assert.Equal(t, "deadbeef1234", got.PatchID)
 }
 
+func TestEnqueueJobWithCIBaseBranch(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo := createRepo(t, db, "/tmp/test-ci-base-branch")
+	commit := createCommit(t, db, repo.ID, "abc123")
+
+	job, err := db.EnqueueJob(EnqueueOpts{
+		RepoID:       repo.ID,
+		CommitID:     commit.ID,
+		GitRef:       "abc123",
+		Agent:        "test",
+		CIBaseBranch: "main",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "main", job.CIBaseBranch)
+	assert.Empty(t, job.Branch, "CIBaseBranch must not populate Branch")
+
+	got, err := db.GetJobByID(job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "main", got.CIBaseBranch)
+	assert.Empty(t, got.Branch)
+
+	claimed, err := db.ClaimJob("worker-1")
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, "main", claimed.CIBaseBranch, "ClaimJob must hydrate CIBaseBranch for event broadcasts")
+}
+
+func TestHookBranchPrefersLocalBranch(t *testing.T) {
+	assert.Equal(t, "feat/x", ReviewJob{Branch: "feat/x", CIBaseBranch: "main"}.HookBranch())
+	assert.Equal(t, "main", ReviewJob{CIBaseBranch: "main"}.HookBranch())
+	assert.Empty(t, ReviewJob{}.HookBranch())
+}
+
 func TestRemapJobGitRef(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -1928,4 +1963,16 @@ func TestUpsertPulledJobRoundTripsBackupColumns(t *testing.T) {
 	require.NoError(t, row.Scan(&ba, &bm))
 	assert.Equal("copilot", ba)
 	assert.Equal("gpt-5", bm)
+}
+
+func TestClaimJobHydratesUUID(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	_, _, enqueued := createJobChain(t, db, "/repo/uuid-hydration", "abc123")
+	require.NotEmpty(t, enqueued.UUID, "enqueue must assign a job UUID")
+
+	claimed := claimJob(t, db, "worker-1")
+	assert.Equal(t, enqueued.ID, claimed.ID)
+	assert.Equal(t, enqueued.UUID, claimed.UUID,
+		"claimed job must carry the stored UUID so completion events keep UUID-based hook idempotency")
 }

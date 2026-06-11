@@ -19,6 +19,7 @@ import (
 	"go.kenn.io/roborev/internal/agent"
 	"go.kenn.io/roborev/internal/config"
 	gitpkg "go.kenn.io/roborev/internal/git"
+	"go.kenn.io/roborev/internal/kata"
 	"go.kenn.io/roborev/internal/prompt"
 	"go.kenn.io/roborev/internal/review"
 	"go.kenn.io/roborev/internal/storage"
@@ -580,6 +581,13 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	// Create a per-job builder with the snapshotted config so exclude
 	// patterns are resolved consistently.
 	pb := prompt.NewBuilderWithConfig(wp.db, cfg).WithContext(ctx).ForRepo(checkout.promptRepoPath, job.RepoID)
+	// CI jobs normally carry a prebuilt prompt whose kata context was gated
+	// on PR author trust by the poller. This rebuild fallback has no author
+	// information, so it must not resolve kata refs from fork-controlled
+	// commit messages (or leak backlog content) — skip kata context entirely.
+	if !job.IsCIReview() {
+		pb = pb.WithKataClient(kata.NewCLIClient(checkout.promptRepoPath))
+	}
 	if err := pb.CleanupStaleSnapshots(prompt.DefaultStaleSnapshotAge); err != nil {
 		log.Printf("[%s] Warning: cleanup stale snapshots for job %d: %v", workerID, job.ID, err)
 	}
@@ -597,7 +605,7 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 			ctx, checkout.promptRepoPath, cfg, job.ReviewType,
 		)
 		reviewPrompt, cleanup, err = preparePrebuiltPrompt(
-			checkout.promptRepoPath, checkout.snapshotTarget, job, reviewPrompt, excludes,
+			ctx, checkout.promptRepoPath, checkout.snapshotTarget, job, reviewPrompt, excludes,
 		)
 		if cleanup != nil {
 			defer cleanup()
@@ -755,6 +763,7 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		Repo:         job.RepoPath,
 		RepoName:     job.RepoName,
 		SHA:          job.GitRef,
+		Branch:       job.HookBranch(),
 		Agent:        agentName,
 		WorktreePath: eventWorktreePath,
 	})
@@ -840,6 +849,7 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 				Repo:         job.RepoPath,
 				RepoName:     job.RepoName,
 				SHA:          job.GitRef,
+				Branch:       job.HookBranch(),
 				Agent:        agentName,
 				WorktreePath: eventWorktreePath,
 			})
@@ -955,9 +965,11 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		Type:         "review.completed",
 		TS:           time.Now(),
 		JobID:        job.ID,
+		JobUUID:      job.UUID,
 		Repo:         job.RepoPath,
 		RepoName:     job.RepoName,
 		SHA:          job.GitRef,
+		Branch:       job.HookBranch(),
 		Agent:        agentName,
 		Verdict:      verdict,
 		Findings:     output,
@@ -1247,9 +1259,11 @@ func (wp *WorkerPool) broadcastFailed(job *storage.ReviewJob, agentName, errorMs
 		Type:         "review.failed",
 		TS:           time.Now(),
 		JobID:        job.ID,
+		JobUUID:      job.UUID,
 		Repo:         job.RepoPath,
 		RepoName:     job.RepoName,
 		SHA:          job.GitRef,
+		Branch:       job.HookBranch(),
 		Agent:        agentName,
 		Error:        errorMsg,
 		WorktreePath: wtPath,
@@ -1434,13 +1448,13 @@ func (wp *WorkerPool) failoverOrFail(
 }
 
 func preparePrebuiltPrompt(
-	repoPath string, snapshotTarget prompt.SnapshotTarget,
+	ctx context.Context, repoPath string, snapshotTarget prompt.SnapshotTarget,
 	job *storage.ReviewJob, reviewPrompt string, excludes []string,
 ) (string, func(), error) {
 	if !strings.Contains(reviewPrompt, prompt.DiffFilePathPlaceholder) {
 		return reviewPrompt, nil, nil
 	}
-	builder := prompt.NewBuilder(nil).ForRepo(repoPath, job.RepoID)
+	builder := prompt.NewBuilder(nil).WithContext(ctx).ForRepo(repoPath, job.RepoID)
 	diffFile, cleanup, err := builder.WriteDiffSnapshotTarget(job.GitRef, excludes, snapshotTarget)
 	if err != nil {
 		return "", nil, fmt.Errorf("prepare diff snapshot for prebuilt prompt: %w", err)

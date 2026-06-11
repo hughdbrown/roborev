@@ -156,7 +156,12 @@ func runSingle(
 	// Record the resolved agent name
 	result.Agent = resolvedAgent.Name()
 
-	// Build prompt (nil DB = no previous review context)
+	// Build prompt (nil DB = no previous review context). No kata client:
+	// daemon-free CI reviews an untrusted checkout, where the PR head
+	// controls .roborev.toml and commit messages, so neither kata_context
+	// settings nor commit-message refs have a trusted source (unlike the
+	// daemon poller, which gates on PR author trust and default-branch
+	// config).
 	builder := prompt.NewBuilderWithConfig(nil, cfg.GlobalConfig).WithContext(ctx).ForRepo(cfg.RepoPath, 0)
 
 	// Normalize review type for prompt building

@@ -15,7 +15,6 @@ type OpenPullRequest struct {
 	Number      int
 	HeadRefOID  string
 	BaseRefName string
-	HeadRefName string
 	Title       string
 	AuthorLogin string
 }
@@ -25,6 +24,7 @@ type PullRequestInfo struct {
 	State       string
 	HeadRefOID  string
 	BaseRefName string
+	AuthorLogin string
 }
 
 func (c *Client) ListOpenPullRequests(ctx context.Context, ghRepo string, limit int) ([]OpenPullRequest, error) {
@@ -57,7 +57,6 @@ func (c *Client) ListOpenPullRequests(ctx context.Context, ghRepo string, limit 
 			Number:      pr.GetNumber(),
 			HeadRefOID:  pr.GetHead().GetSHA(),
 			BaseRefName: pr.GetBase().GetRef(),
-			HeadRefName: pr.GetHead().GetRef(),
 			Title:       pr.GetTitle(),
 			AuthorLogin: pr.GetUser().GetLogin(),
 		})
@@ -88,6 +87,7 @@ func (c *Client) GetPullRequest(ctx context.Context, ghRepo string, prNumber int
 		State:       pr.GetState(),
 		HeadRefOID:  pr.GetHead().GetSHA(),
 		BaseRefName: pr.GetBase().GetRef(),
+		AuthorLogin: pr.GetUser().GetLogin(),
 	}, nil
 }
 

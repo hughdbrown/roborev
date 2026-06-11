@@ -44,9 +44,14 @@ type CommitInfo struct {
 
 // GetCommitInfo retrieves commit metadata
 func GetCommitInfo(repoPath, sha string) (*CommitInfo, error) {
+	return GetCommitInfoCtx(context.Background(), repoPath, sha)
+}
+
+// GetCommitInfoCtx is GetCommitInfo with a cancellable context.
+func GetCommitInfoCtx(ctx context.Context, repoPath, sha string) (*CommitInfo, error) {
 	// Use record separator (ASCII 30) to delimit fields - won't appear in commit messages
 	const rs = "\x1e"
-	cmd := exec.Command("git", "log", "-1", "--format=%H"+rs+"%an"+rs+"%s"+rs+"%aI"+rs+"%b", sha)
+	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%H"+rs+"%an"+rs+"%s"+rs+"%aI"+rs+"%b", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -389,10 +394,17 @@ func listRemotes(repoPath string) ([]string, error) {
 func GetDiff(
 	repoPath, sha string, extraExcludes ...string,
 ) (string, error) {
+	return GetDiffCtx(context.Background(), repoPath, sha, extraExcludes...)
+}
+
+// GetDiffCtx is GetDiff with a cancellable context.
+func GetDiffCtx(
+	ctx context.Context, repoPath, sha string, extraExcludes ...string,
+) (string, error) {
 	args := []string{"show", sha, "--format=", "--"}
 	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
 
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -408,16 +420,30 @@ func GetDiff(
 func GetDiffLimited(
 	repoPath, sha string, maxBytes int, extraExcludes ...string,
 ) (string, bool, error) {
+	return GetDiffLimitedCtx(context.Background(), repoPath, sha, maxBytes, extraExcludes...)
+}
+
+// GetDiffLimitedCtx is GetDiffLimited with a cancellable context.
+func GetDiffLimitedCtx(
+	ctx context.Context, repoPath, sha string, maxBytes int, extraExcludes ...string,
+) (string, bool, error) {
 	args := []string{"show", sha, "--format=", "--"}
 	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
-	return captureGitOutputLimited(repoPath, maxBytes, args...)
+	return captureGitOutputLimited(ctx, repoPath, maxBytes, args...)
 }
 
 // GetFilesChanged returns the list of files changed in a commit
 func GetFilesChanged(
 	repoPath, sha string,
 ) ([]string, error) {
-	cmd := exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+	return GetFilesChangedCtx(context.Background(), repoPath, sha)
+}
+
+// GetFilesChangedCtx is GetFilesChanged with a cancellable context.
+func GetFilesChangedCtx(
+	ctx context.Context, repoPath, sha string,
+) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -475,7 +501,12 @@ func IsUnbornHead(repoPath string) bool {
 
 // ResolveSHA resolves a ref (like HEAD) to a full SHA
 func ResolveSHA(repoPath, ref string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", ref)
+	return ResolveSHACtx(context.Background(), repoPath, ref)
+}
+
+// ResolveSHACtx is ResolveSHA with a cancellable context.
+func ResolveSHACtx(ctx context.Context, repoPath, ref string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", ref)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -660,8 +691,13 @@ func ReadFile(repoPath, sha, filePath string) ([]byte, error) {
 // GetParentCommits returns the N commits before the given commit (not including it)
 // Returns commits in reverse chronological order (most recent parent first)
 func GetParentCommits(repoPath, sha string, count int) ([]string, error) {
+	return GetParentCommitsCtx(context.Background(), repoPath, sha, count)
+}
+
+// GetParentCommitsCtx is GetParentCommits with a cancellable context.
+func GetParentCommitsCtx(ctx context.Context, repoPath, sha string, count int) ([]string, error) {
 	// Use git log to get parent commits, skipping the commit itself
-	cmd := exec.Command("git", "log", "--format=%H", "-n", fmt.Sprintf("%d", count), "--skip=1", sha)
+	cmd := exec.CommandContext(ctx, "git", "log", "--format=%H", "-n", fmt.Sprintf("%d", count), "--skip=1", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -709,7 +745,12 @@ func ParseRange(ref string) (start, end string, ok bool) {
 
 // GetRangeCommits returns all commits in a range (oldest first)
 func GetRangeCommits(repoPath, rangeRef string) ([]string, error) {
-	cmd := exec.Command("git", "log", "--format=%H", "--reverse", rangeRef)
+	return GetRangeCommitsCtx(context.Background(), repoPath, rangeRef)
+}
+
+// GetRangeCommitsCtx is GetRangeCommits with a cancellable context.
+func GetRangeCommitsCtx(ctx context.Context, repoPath, rangeRef string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "--format=%H", "--reverse", rangeRef)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -734,10 +775,17 @@ func GetRangeCommits(repoPath, rangeRef string) ([]string, error) {
 func GetRangeDiff(
 	repoPath, rangeRef string, extraExcludes ...string,
 ) (string, error) {
+	return GetRangeDiffCtx(context.Background(), repoPath, rangeRef, extraExcludes...)
+}
+
+// GetRangeDiffCtx is GetRangeDiff with a cancellable context.
+func GetRangeDiffCtx(
+	ctx context.Context, repoPath, rangeRef string, extraExcludes ...string,
+) (string, error) {
 	args := []string{"diff", rangeRef, "--"}
 	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
 
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -753,9 +801,16 @@ func GetRangeDiff(
 func GetRangeDiffLimited(
 	repoPath, rangeRef string, maxBytes int, extraExcludes ...string,
 ) (string, bool, error) {
+	return GetRangeDiffLimitedCtx(context.Background(), repoPath, rangeRef, maxBytes, extraExcludes...)
+}
+
+// GetRangeDiffLimitedCtx is GetRangeDiffLimited with a cancellable context.
+func GetRangeDiffLimitedCtx(
+	ctx context.Context, repoPath, rangeRef string, maxBytes int, extraExcludes ...string,
+) (string, bool, error) {
 	args := []string{"diff", rangeRef, "--"}
 	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
-	return captureGitOutputLimited(repoPath, maxBytes, args...)
+	return captureGitOutputLimited(ctx, repoPath, maxBytes, args...)
 }
 
 // HasUncommittedChanges returns true if there are uncommitted changes (staged, unstaged, or untracked files)
@@ -882,6 +937,11 @@ func GetDirtyDiff(
 	lsArgs := []string{"ls-files", "--others", "--exclude-standard", "--"}
 	lsArgs = append(lsArgs, ".")
 	lsArgs = append(lsArgs, excludedPathPatterns...)
+	// Suppress a developer's UNTRACKED local kata override from dirty
+	// reviews. A tracked .kata.local.toml is deliberately not excluded
+	// anywhere (it steers kata binding resolution, so committing or
+	// modifying it must stay visible to review).
+	lsArgs = append(lsArgs, ":(exclude,glob)**/.kata.local.toml")
 	lsArgs = append(lsArgs, extra...)
 	cmd = exec.Command("git", lsArgs...)
 	cmd.Dir = repoPath
@@ -1039,12 +1099,12 @@ func ReviewPathspecArgs(extraExcludes ...string) []string {
 	return args
 }
 
-func captureGitOutputLimited(repoPath string, maxBytes int, args ...string) (string, bool, error) {
+func captureGitOutputLimited(ctx context.Context, repoPath string, maxBytes int, args ...string) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", true, nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -1145,7 +1205,14 @@ func isBinaryContent(content []byte) bool {
 func GetRangeFilesChanged(
 	repoPath, rangeRef string,
 ) ([]string, error) {
-	cmd := exec.Command("git", "diff", "--name-only", rangeRef)
+	return GetRangeFilesChangedCtx(context.Background(), repoPath, rangeRef)
+}
+
+// GetRangeFilesChangedCtx is GetRangeFilesChanged with a cancellable context.
+func GetRangeFilesChangedCtx(
+	ctx context.Context, repoPath, rangeRef string,
+) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", rangeRef)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1171,13 +1238,18 @@ func GetRangeFilesChanged(
 
 // GetRangeStart returns the start commit (first parent before range) for context lookup
 func GetRangeStart(repoPath, rangeRef string) (string, error) {
+	return GetRangeStartCtx(context.Background(), repoPath, rangeRef)
+}
+
+// GetRangeStartCtx is GetRangeStart with a cancellable context.
+func GetRangeStartCtx(ctx context.Context, repoPath, rangeRef string) (string, error) {
 	start, _, ok := ParseRange(rangeRef)
 	if !ok {
 		return "", fmt.Errorf("invalid range: %s", rangeRef)
 	}
 
 	// Resolve the start ref
-	return ResolveSHA(repoPath, start)
+	return ResolveSHACtx(ctx, repoPath, start)
 }
 
 // IsRebaseInProgress returns true if a rebase operation is in progress

@@ -978,7 +978,7 @@ func TestCIPollerProcessPR_FallsBackWhenPromptPrebuildFails(t *testing.T) {
 			CreatedAt: time.Date(2026, time.March, 27, 12, 0, 0, 0, time.UTC),
 		}}, nil
 	}
-	h.Poller.buildReviewPromptFn = func(string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
+	h.Poller.buildReviewPromptFn = func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
 		return "", errors.New("prompt prebuild exploded")
 	}
 
@@ -3771,6 +3771,7 @@ func TestRetryDueReviewAttemptFetchesPRMissingFromOpenPage(t *testing.T) {
 	h.CaptureCommitStatuses()
 
 	const headSHA = "offpage00000001"
+	const baseBranch = "release/3.1"
 	const prNum = 132
 	now := time.Now()
 	created, err := h.DB.ReserveReviewAttempt("acme/api", prNum, headSHA, now.Add(-time.Hour))
@@ -3783,7 +3784,7 @@ func TestRetryDueReviewAttemptFetchesPRMissingFromOpenPage(t *testing.T) {
 	h.Poller.prPostTargetFn = func(_ context.Context, ghRepo string, prNumber int) (panelPostTarget, error) {
 		assert.Equal("acme/api", ghRepo)
 		lookedUp = append(lookedUp, prNumber)
-		return panelPostTarget{Open: true, HeadSHA: headSHA, BaseRefName: "main"}, nil
+		return panelPostTarget{Open: true, HeadSHA: headSHA, BaseRefName: baseBranch}, nil
 	}
 
 	h.Poller.retryDueReviewAttempts(context.Background(), "acme/api",
@@ -3799,7 +3800,21 @@ func TestRetryDueReviewAttemptFetchesPRMissingFromOpenPage(t *testing.T) {
 	panel, err := h.DB.GetActiveCIPanelByPRSHA("acme/api", prNum, headSHA)
 	require.NoError(t, err)
 	assert.Equal(headSHA, panel.HeadSHA)
-	assert.Equal("base-"+headSHA+".."+headSHA, h.panelMembers(t, "acme/api", prNum, headSHA)[0].GitRef)
+	members := h.panelMembers(t, "acme/api", prNum, headSHA)
+	assert.Equal("base-"+headSHA+".."+headSHA, members[0].GitRef)
+	for _, m := range members {
+		assert.Equal(baseBranch, m.CIBaseBranch,
+			"retry direct-lookup path must persist the PR base branch on member jobs for branch-filtered hooks")
+		assert.Empty(m.Branch,
+			"CI member jobs must not record a local branch (it would leak into fix/refine discovery)")
+	}
+	require.NotNil(t, panel.SynthesisJobID)
+	synth, err := h.DB.GetJobByID(*panel.SynthesisJobID)
+	require.NoError(t, err)
+	assert.Equal(baseBranch, synth.CIBaseBranch,
+		"retry direct-lookup path must persist the PR base branch on the synthesis job")
+	assert.Empty(synth.Branch,
+		"CI synthesis job must not record a local branch (it would leak into fix/refine discovery)")
 }
 
 // TestReconcileStuckAttempt covers the crash/stuck reconcile: a pending attempt
@@ -3861,4 +3876,125 @@ func TestReconcileStuckAttempt(t *testing.T) {
 	require.NotNil(t, live)
 	assert.Equal("pending", live.State, "live in-flight attempt is left untouched")
 	assert.Nil(live.NextAttemptAt, "live attempt keeps its NULL next_attempt_at")
+}
+
+func TestBuildPanelOpts_RecordsPRBranchOnJobs(t *testing.T) {
+	p := &CIPoller{}
+	p.buildReviewPromptFn = func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
+		return "prebuilt prompt", nil
+	}
+
+	memberOpts, synthOpts, panelErr := p.buildPanelOpts(context.Background(), buildPanelOptsInput{
+		repo:       &storage.Repo{ID: 1, RootPath: t.TempDir()},
+		cfg:        config.DefaultConfig(),
+		ghRepo:     "kenn-io/roborev",
+		gitRef:     "base..head",
+		baseBranch: "release/2.0",
+		prNumber:   42,
+		members:    []config.ResolvedMember{{Name: "m1", Agent: "codex"}},
+		synth:      config.SynthesisSpec{Agent: "codex"},
+	})
+	require.NoError(t, panelErr)
+
+	require.Len(t, memberOpts, 1)
+	assert.Equal(t, "release/2.0", memberOpts[0].CIBaseBranch,
+		"CI member jobs must record the PR base (target) branch so branch-filtered hooks fire")
+	assert.Empty(t, memberOpts[0].Branch,
+		"CI member jobs must not set Branch (it would leak into branch-scoped local flows)")
+	assert.Equal(t, "release/2.0", synthOpts.CIBaseBranch,
+		"CI synthesis job must record the PR base (target) branch so branch-filtered hooks fire")
+	assert.Empty(t, synthOpts.Branch,
+		"CI synthesis job must not set Branch (it would leak into branch-scoped local flows)")
+}
+
+// installFakeKata copies the test binary to a temp dir as `kata` and points
+// PATH and ROBOREV_TEST_FAKE_KATA at it, so any kata CLI invocation
+// deterministically returns an open issue (see TestMain) instead of depending
+// on whether the machine has kata installed.
+func installFakeKata(t *testing.T) {
+	t.Helper()
+	self, err := os.Executable()
+	require.NoError(t, err)
+	data, err := os.ReadFile(self)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	name := "kata"
+	if runtime.GOOS == "windows" {
+		name = "kata.exe"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o755))
+	t.Setenv("ROBOREV_TEST_FAKE_KATA", "1")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestCIPromptPrebuildNeverIncludesKataContext(t *testing.T) {
+	// A fake kata on PATH would serve an open issue, so this test fails if
+	// CI prompt building ever reattaches a real kata client.
+	installFakeKata(t)
+	repo := testutil.NewTestRepoWithCommit(t)
+	// Even a checkout and global config that both enable kata context must
+	// not surface it: CI prompts carry no kata client because whoever
+	// controls the PR head cannot be verified as trusted (see
+	// buildReviewPromptFn).
+	require.NoError(t, os.WriteFile(filepath.Join(repo.Path(), ".roborev.toml"),
+		[]byte("[kata_context]\nmode = \"open\"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo.Path(), ".kata.toml"),
+		[]byte("[project]\nname = \"victim\"\n"), 0o644))
+	sha := repo.CommitFile("feature.txt", "new feature\n", "Implement feature\n\nCloses: kata#abc4")
+
+	cfg := config.DefaultConfig()
+	cfg.KataContext.Mode = config.KataModeOpen
+	p := NewCIPoller(nil, NewStaticConfig(cfg), nil)
+
+	out, err := p.callBuildReviewPrompt(context.Background(), repo.Path(), sha, 0, 0, "test", "", "", "", cfg)
+	require.NoError(t, err)
+	assert.NotContains(t, out, "Task Context (kata)",
+		"CI prompt prebuilds must never include kata task-ledger content")
+	assert.NotContains(t, out, "Secret kata body.",
+		"fake kata output must never reach the prompt")
+}
+
+func TestBuildPanelOptsAbortsOnCanceledPrebuild(t *testing.T) {
+	in := buildPanelOptsInput{
+		repo:    &storage.Repo{ID: 1, RootPath: "/tmp/repo"},
+		cfg:     config.DefaultConfig(),
+		ghRepo:  "kenn-io/roborev",
+		gitRef:  "base..head",
+		members: []config.ResolvedMember{{Name: "m1", Agent: "codex"}},
+		synth:   config.SynthesisSpec{Agent: "codex"},
+	}
+
+	t.Run("cancellation aborts the run", func(t *testing.T) {
+		p := &CIPoller{}
+		p.buildReviewPromptFn = func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
+			return "", fmt.Errorf("building prompt: %w", context.Canceled)
+		}
+		_, _, err := p.buildPanelOpts(context.Background(), in)
+		require.ErrorIs(t, err, context.Canceled, "canceled prebuild must abort instead of enqueuing promptless jobs")
+	})
+
+	t.Run("other prebuild errors still enqueue without stored prompt", func(t *testing.T) {
+		p := &CIPoller{}
+		p.buildReviewPromptFn = func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
+			return "", errors.New("prompt prebuild exploded")
+		}
+		memberOpts, _, err := p.buildPanelOpts(context.Background(), in)
+		require.NoError(t, err)
+		require.Len(t, memberOpts, 1)
+		assert.Empty(t, memberOpts[0].Prompt)
+		assert.False(t, memberOpts[0].PromptPrebuilt)
+	})
+}
+
+func TestRetryAttemptPRCarriesAuthor(t *testing.T) {
+	p := &CIPoller{}
+	p.prPostTargetFn = func(_ context.Context, _ string, _ int) (panelPostTarget, error) {
+		return panelPostTarget{Open: true, HeadSHA: "head000", BaseRefName: "main", AuthorLogin: "alice"}, nil
+	}
+
+	pr, ok := p.retryAttemptPR(context.Background(), "acme/api",
+		&storage.ReviewAttempt{PRNumber: 7, HeadSHA: "head000"}, nil)
+	require.True(t, ok)
+	assert.Equal(t, "alice", pr.Author.Login,
+		"direct lookup must reconstruct the PR with its author preserved")
 }

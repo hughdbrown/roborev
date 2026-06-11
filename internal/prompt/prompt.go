@@ -19,6 +19,7 @@ import (
 
 	"go.kenn.io/roborev/internal/config"
 	"go.kenn.io/roborev/internal/git"
+	"go.kenn.io/roborev/internal/kata"
 	"go.kenn.io/roborev/internal/storage"
 )
 
@@ -81,11 +82,12 @@ type HistoricalReviewContext struct {
 
 // Builder constructs review prompts
 type Builder struct {
-	db        *storage.DB
-	globalCfg *config.Config // optional global config for exclude patterns
-	ctx       context.Context
-	repoPath  string
-	repoID    int64
+	db         *storage.DB
+	globalCfg  *config.Config // optional global config for exclude patterns
+	ctx        context.Context
+	repoPath   string
+	repoID     int64
+	kataClient kata.Client
 }
 
 // DiffFilePathPlaceholder is a sentinel path embedded in prebuilt
@@ -132,6 +134,14 @@ func (b *Builder) ForRepo(repoPath string, repoID int64) *Builder {
 	next := *b
 	next.repoPath = repoPath
 	next.repoID = repoID
+	return &next
+}
+
+// WithKataClient returns a builder that resolves kata task context via client.
+// A nil client disables kata context.
+func (b *Builder) WithKataClient(client kata.Client) *Builder {
+	next := *b
+	next.kataClient = client
 	return &next
 }
 
@@ -259,9 +269,9 @@ func (b *Builder) WriteDiffSnapshotTarget(gitRef string, excludes []string, targ
 		err      error
 	)
 	if git.IsRange(gitRef) {
-		fullDiff, err = git.GetRangeDiff(b.repoPath, gitRef, excludes...)
+		fullDiff, err = git.GetRangeDiffCtx(b.context(), b.repoPath, gitRef, excludes...)
 	} else {
-		fullDiff, err = git.GetDiff(b.repoPath, gitRef, excludes...)
+		fullDiff, err = git.GetDiffCtx(b.context(), b.repoPath, gitRef, excludes...)
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("capture diff: %w", err)
@@ -538,6 +548,14 @@ func (b *Builder) BuildDirtyWithFiles(diff string, changedFiles []string, contex
 	if repoCfg, err := config.LoadRepoConfig(b.repoPath); err == nil && repoCfg != nil {
 		ctx.optional.ProjectGuidelines = buildProjectGuidelinesSectionView(repoCfg.ReviewGuidelines)
 	}
+
+	// Uncommitted changes have no commit messages, so "current" mode has no
+	// refs to resolve; "open" mode still lists open katas.
+	kataView, err := b.resolveKataContext(nil)
+	if err != nil {
+		return "", err
+	}
+	ctx.optional.KataContext = kataView
 
 	// Get previous reviews for context (use HEAD as reference point)
 	if contextCount > 0 && b.db != nil {
@@ -1009,6 +1027,9 @@ func measureOptionalSectionsLoss(original, trimmed ReviewOptionalContext) int {
 	if original.ProjectGuidelines != nil && trimmed.ProjectGuidelines == nil {
 		loss++
 	}
+	if original.KataContext != nil && trimmed.KataContext == nil {
+		loss++
+	}
 	return loss
 }
 
@@ -1083,7 +1104,7 @@ func (b *Builder) buildSinglePrompt(sha string, contextCount int, agentName, rev
 
 	// Include previous review attempts for this same commit (for re-reviews)
 	ctx.optional.PreviousAttempts = previousAttemptViewsFromContexts(b.previousAttemptContexts(sha))
-	if files, err := git.GetFilesChanged(b.repoPath, sha); err == nil {
+	if files, err := git.GetFilesChangedCtx(b.context(), b.repoPath, sha); err == nil {
 		ctx.optional.DependencyMetadata = buildDependencyMetadataSection(files)
 	}
 
@@ -1091,10 +1112,16 @@ func (b *Builder) buildSinglePrompt(sha string, contextCount int, agentName, rev
 	shortSHA := gitrepo.ShortSHA(sha)
 
 	// Get commit info
-	info, err := git.GetCommitInfo(b.repoPath, sha)
+	info, err := git.GetCommitInfoCtx(b.context(), b.repoPath, sha)
 	if err != nil {
 		return "", fmt.Errorf("get commit info: %w", err)
 	}
+
+	kataView, err := b.resolveKataContext([]string{info.Subject + "\n\n" + info.Body})
+	if err != nil {
+		return "", err
+	}
+	ctx.optional.KataContext = kataView
 
 	currentView := currentCommitSectionView{
 		Commit:  shortSHA,
@@ -1122,7 +1149,7 @@ func (b *Builder) buildSinglePrompt(sha string, contextCount int, agentName, rev
 	excludes := b.resolveExcludes(reviewType)
 	bodyLimit := max(0, ctx.promptCap-len(ctx.requiredPrefix))
 	diffLimit := max(0, bodyLimit-len(currentRequired)-len(currentOverflow)-len(emptyDiffBlock))
-	diff, truncated, err := git.GetDiffLimited(b.repoPath, sha, diffLimit, excludes...)
+	diff, truncated, err := git.GetDiffLimitedCtx(b.context(), b.repoPath, sha, diffLimit, excludes...)
 	if err != nil {
 		return "", fmt.Errorf("get diff: %w", err)
 	}
@@ -1193,7 +1220,7 @@ func (b *Builder) buildRangePrompt(rangeRef string, contextCount int, agentName,
 
 	// Get previous reviews from before the range start
 	if contextCount > 0 && b.db != nil {
-		startSHA, err := git.GetRangeStart(b.repoPath, rangeRef)
+		startSHA, err := git.GetRangeStartCtx(b.context(), b.repoPath, rangeRef)
 		if err == nil {
 			contexts, err := b.getPreviousReviewContexts(startSHA, contextCount)
 			if err == nil && len(contexts) > 0 {
@@ -1206,11 +1233,11 @@ func (b *Builder) buildRangePrompt(rangeRef string, contextCount int, agentName,
 	ctx.optional.PreviousAttempts = previousAttemptViewsFromContexts(b.previousAttemptContexts(rangeRef))
 
 	// Get commits in range
-	commits, err := git.GetRangeCommits(b.repoPath, rangeRef)
+	commits, err := git.GetRangeCommitsCtx(b.context(), b.repoPath, rangeRef)
 	if err != nil {
 		return "", fmt.Errorf("get range commits: %w", err)
 	}
-	if files, err := git.GetRangeFilesChanged(b.repoPath, rangeRef); err == nil {
+	if files, err := git.GetRangeFilesChangedCtx(b.context(), b.repoPath, rangeRef); err == nil {
 		ctx.optional.DependencyMetadata = buildDependencyMetadataSection(files)
 	}
 
@@ -1219,15 +1246,22 @@ func (b *Builder) buildRangePrompt(rangeRef string, contextCount int, agentName,
 	ctx.optional.InRangeReviews = inRangeReviewViews(b.lookupReviewContexts(commits, true))
 
 	entries := make([]commitRangeEntryView, 0, len(commits))
+	var kataMessages []string
 	for _, commitSHA := range commits {
 		short := gitrepo.ShortSHA(commitSHA)
-		info, err := git.GetCommitInfo(b.repoPath, commitSHA)
+		info, err := git.GetCommitInfoCtx(b.context(), b.repoPath, commitSHA)
 		if err == nil {
 			entries = append(entries, commitRangeEntryView{Commit: short, Subject: escapeXML(info.Subject)})
+			kataMessages = append(kataMessages, info.Subject+"\n\n"+info.Body)
 			continue
 		}
 		entries = append(entries, commitRangeEntryView{Commit: short})
 	}
+	kataView, err := b.resolveKataContext(kataMessages)
+	if err != nil {
+		return "", err
+	}
+	ctx.optional.KataContext = kataView
 	currentView := commitRangeSectionView{Count: len(commits), Entries: entries}
 	currentRequiredText, err := renderCommitRangeRequired(currentView)
 	if err != nil {
@@ -1249,7 +1283,7 @@ func (b *Builder) buildRangePrompt(rangeRef string, contextCount int, agentName,
 	excludes := b.resolveExcludes(reviewType)
 	bodyLimit := max(0, ctx.promptCap-len(ctx.requiredPrefix))
 	diffLimit := max(0, bodyLimit-len(currentRequiredText)-len(currentOverflowText)-len(emptyDiffBlock))
-	diff, truncated, err := git.GetRangeDiffLimited(b.repoPath, rangeRef, diffLimit, excludes...)
+	diff, truncated, err := git.GetRangeDiffLimitedCtx(b.context(), b.repoPath, rangeRef, diffLimit, excludes...)
 	if err != nil {
 		return "", fmt.Errorf("get range diff: %w", err)
 	}
@@ -1327,6 +1361,81 @@ func buildProjectGuidelinesSectionView(guidelines string) *markdownSectionView {
 	}
 }
 
+// Kata section intros by resolution mode. Current-mode issues were
+// explicitly referenced by commit messages, so they are authoritative
+// intent; open-mode issues are the whole open backlog and may be
+// unrelated to the change under review.
+const (
+	kataIntroCurrent = "The kata issue(s) below are referenced by this change and are the authoritative task description. Treat them as the source of truth for intent. Raise as high-priority findings: (a) code that diverges from or omits what a kata specifies, and (b) contradictions between the change and a kata, or across multiple katas."
+	kataIntroOpen    = "The kata issue(s) below are the open tasks in this project's tracker, included as background context. They may be unrelated to this change. Use them to understand intent where relevant; do not raise findings merely because this change does not address an open kata."
+)
+
+func buildKataContextSectionView(issues []kata.Issue, notes []string, maxChars int, mode string) *markdownSectionView {
+	if len(issues) == 0 && len(notes) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for _, n := range notes {
+		b.WriteString("> ")
+		b.WriteString(n)
+		b.WriteString("\n")
+	}
+	if len(notes) > 0 && len(issues) > 0 {
+		b.WriteString("\n")
+	}
+	for i, issue := range issues {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		ref := issue.QualifiedID
+		if ref == "" {
+			ref = issue.ShortID
+		}
+		fmt.Fprintf(&b, "### %s — %s", ref, issue.Title)
+		if issue.Status != "" {
+			fmt.Fprintf(&b, " (%s)", issue.Status)
+		}
+		b.WriteString("\n\n")
+		if body := strings.TrimSpace(issue.Body); body != "" {
+			b.WriteString(body)
+			b.WriteString("\n")
+		}
+	}
+	body := strings.TrimSpace(b.String())
+	if body == "" {
+		return nil
+	}
+	if maxChars > 0 && len(body) > maxChars {
+		body = strings.TrimSpace(truncateUTF8(body, maxChars)) + "\n\n_[kata context truncated]_"
+	}
+	intro := kataIntroCurrent
+	if mode == config.KataModeOpen {
+		intro = kataIntroOpen
+	}
+	return &markdownSectionView{Heading: "## Task Context (kata)", Body: intro + "\n\n" + body}
+}
+
+// resolveKataContext populates the optional KataContext section when
+// configured. It returns an error only for context cancellation, so a
+// canceled review aborts prompt construction instead of proceeding.
+func (b *Builder) resolveKataContext(messages []string) (*markdownSectionView, error) {
+	if b.kataClient == nil {
+		return nil, nil
+	}
+	kc := config.ResolveKataContext(b.repoPath, b.globalCfg)
+	if kc.Mode == config.KataModeOff {
+		return nil, nil
+	}
+	res, err := kata.ResolveContext(b.context(), b.kataClient, kc.Mode, messages)
+	if err != nil {
+		return nil, fmt.Errorf("resolve kata context: %w", err)
+	}
+	for _, err := range res.Errs {
+		log.Printf("kata context (repo %s, mode %s): %v", b.repoPath, kc.Mode, err)
+	}
+	return buildKataContextSectionView(res.Issues, res.Notes, kc.MaxChars, kc.Mode), nil
+}
+
 func buildAdditionalContextSection(additionalContext string) string {
 	trimmed := strings.TrimSpace(additionalContext)
 	if trimmed == "" {
@@ -1400,7 +1509,7 @@ func (b *Builder) previousAttemptContexts(gitRef string) []reviewAttemptContext 
 // getPreviousReviewContexts gets the N commits before the target and looks up their reviews and responses
 func (b *Builder) getPreviousReviewContexts(sha string, count int) ([]HistoricalReviewContext, error) {
 	// Get parent commits from git
-	parentSHAs, err := git.GetParentCommits(b.repoPath, sha, count)
+	parentSHAs, err := git.GetParentCommitsCtx(b.context(), b.repoPath, sha, count)
 	if err != nil {
 		return nil, fmt.Errorf("get parent commits: %w", err)
 	}
