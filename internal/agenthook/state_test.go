@@ -3,10 +3,13 @@ package agenthook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -137,6 +140,84 @@ func TestCountOpenFailedReviewsExcludesUnreachableBranchlessReviews(t *testing.T
 
 	assert.True(ok)
 	assert.Equal(4, count, "only the unreachable branchless review must be excluded on a branch query")
+}
+
+func TestCountOpenFailedReviewsExcludesBaseBranchBranchlessReviews(t *testing.T) {
+	assert := assert.New(t)
+	repo := testutil.NewGitRepo(t)
+	base := repo.CommitFile("base.txt", "base\n", "base")
+	mainOnly := repo.CommitFile("main.txt", "main\n", "main only")
+	repo.RunGit("checkout", "-b", "feature/lineage")
+	featureHead := repo.CommitFile("feature.txt", "feature\n", "feature")
+
+	closed := false
+	verdict := "F"
+	jobs := []storage.ReviewJob{
+		{Status: storage.JobStatusDone, Closed: &closed, Verdict: &verdict, GitRef: base},
+		{Status: storage.JobStatusDone, Closed: &closed, Verdict: &verdict, GitRef: mainOnly},
+		{Status: storage.JobStatusDone, Closed: &closed, Verdict: &verdict, GitRef: featureHead},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		assert.NoError(json.NewEncoder(w).Encode(jobsResponse{Jobs: jobs}))
+	}))
+	t.Cleanup(server.Close)
+
+	count, ok := countOpenFailedReviews(context.Background(), repo.Path(), "feature/lineage", featureHead, server.URL)
+
+	assert.True(ok)
+	assert.Equal(1, count, "only the branchless review outside trunk history should count")
+}
+
+func TestCountOpenFailedReviewsCachesBranchlessLineageContext(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	repo := testutil.NewGitRepo(t)
+	repo.CommitFile("base.txt", "base\n", "base")
+	repo.RunGit("checkout", "-b", "feature/lineage")
+
+	closed := false
+	verdict := "F"
+	jobs := make([]storage.ReviewJob, 0, 25)
+	for i := range 25 {
+		ref := repo.CommitFile(
+			filepath.Join("feature", fmt.Sprintf("file-%02d.txt", i)),
+			"feature\n",
+			"feature commit",
+		)
+		jobs = append(jobs, storage.ReviewJob{Status: storage.JobStatusDone, Closed: &closed, Verdict: &verdict, GitRef: ref})
+	}
+	featureHead := repo.HeadSHA()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		assert.NoError(json.NewEncoder(w).Encode(jobsResponse{Jobs: jobs}))
+	}))
+	t.Cleanup(server.Close)
+
+	gitPath, err := exec.LookPath("git")
+	require.NoError(err)
+	countPath := filepath.Join(t.TempDir(), "git-count")
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	shellQuote := func(path string) string {
+		return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+	}
+	cmdQuote := func(path string) string {
+		return `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
+	}
+	wrapper := fmt.Sprintf("#!/bin/sh\nprintf x >> %s\nexec %s \"$@\"\n", shellQuote(countPath), shellQuote(gitPath))
+	if runtime.GOOS == "windows" {
+		wrapperPath += ".cmd"
+		wrapper = fmt.Sprintf("@echo off\r\n<nul set /p dummy=x>>%s\r\n%s %%*\r\nexit /b %%ERRORLEVEL%%\r\n", cmdQuote(countPath), cmdQuote(gitPath))
+	}
+	require.NoError(os.WriteFile(wrapperPath, []byte(wrapper), 0o755))
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	count, ok := countOpenFailedReviews(context.Background(), repo.Path(), "feature/lineage", featureHead, server.URL)
+
+	assert.True(ok)
+	assert.Equal(len(jobs), count)
+	gitCalls, err := os.ReadFile(countPath)
+	require.NoError(err)
+	assert.LessOrEqual(strings.Count(string(gitCalls), "x"), 5, "lineage context should be built once instead of spawning git per branchless job")
 }
 
 func TestCountOpenFailedReviewsExcludesNonReviewJobTypes(t *testing.T) {

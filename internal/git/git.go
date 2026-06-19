@@ -554,6 +554,117 @@ func IsAncestor(repoPath, ancestor, descendant string) (bool, error) {
 	return false, fmt.Errorf("git merge-base --is-ancestor: %w", err)
 }
 
+// RefMatchesBranchLineage reports whether ref belongs to currentBranch's
+// current lineage. The ref must be reachable from head. For non-default
+// branches, refs already reachable from the default branch are excluded so
+// branchless reviews from trunk history do not follow every feature branch.
+// If the default branch cannot be identified, concrete branchless refs fail
+// closed because there is no trunk boundary to compare against.
+func RefMatchesBranchLineage(repoPath, currentBranch, head, ref string) bool {
+	matcher, err := NewBranchLineageMatcher(repoPath, currentBranch, head)
+	return err == nil && matcher.Matches(ref)
+}
+
+// BranchLineageMatcher caches the current branch lineage as a commit set so a
+// batch of branchless concrete review refs can be checked without repeatedly
+// spawning git processes. For non-default branches, the set contains commits
+// reachable from head and not reachable from the repository default branch. For
+// the default branch itself, the set contains commits reachable from head.
+type BranchLineageMatcher struct {
+	repoPath       string
+	commits        map[string]struct{}
+	resolvedCommit map[string]string
+}
+
+// NewBranchLineageMatcher builds a reusable matcher for currentBranch's current
+// lineage. Callers that need to test more than one ref should create one matcher
+// and reuse Matches instead of calling RefMatchesBranchLineage repeatedly.
+func NewBranchLineageMatcher(repoPath, currentBranch, head string) (*BranchLineageMatcher, error) {
+	return NewBranchLineageMatcherCtx(context.Background(), repoPath, currentBranch, head)
+}
+
+// NewBranchLineageMatcherCtx is NewBranchLineageMatcher with a cancellable
+// context.
+func NewBranchLineageMatcherCtx(ctx context.Context, repoPath, currentBranch, head string) (*BranchLineageMatcher, error) {
+	currentBranch = strings.TrimSpace(currentBranch)
+	head = strings.TrimSpace(head)
+	if repoPath == "" || currentBranch == "" || head == "" {
+		return nil, fmt.Errorf("repo path, current branch, and head are required")
+	}
+	defaultBranch, err := GetDefaultBranch(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"rev-list", head}
+	if !IsOnBaseBranch(repoPath, currentBranch, defaultBranch) {
+		args = append(args, "--not", defaultBranch)
+	}
+	cmd := newGitCmdContext(ctx, args...)
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-list branch lineage: %w", err)
+	}
+	commits := make(map[string]struct{})
+	for commit := range strings.FieldsSeq(string(out)) {
+		commits[commit] = struct{}{}
+	}
+	return &BranchLineageMatcher{
+		repoPath:       repoPath,
+		commits:        commits,
+		resolvedCommit: make(map[string]string),
+	}, nil
+}
+
+// Matches reports whether ref belongs to the cached branch lineage. Range refs
+// are matched by their end ref, preserving RefMatchesBranchLineage behavior.
+func (m *BranchLineageMatcher) Matches(ref string) bool {
+	if m == nil {
+		return false
+	}
+	ref = strings.TrimSpace(ref)
+	if _, end, ok := ParseRange(ref); ok {
+		ref = strings.TrimSpace(end)
+	}
+	if ref == "" {
+		return false
+	}
+	if _, ok := m.commits[ref]; ok {
+		return true
+	}
+	if isFullObjectID(ref) {
+		return false
+	}
+	commit, ok := m.resolvedCommit[ref]
+	if !ok {
+		var err error
+		commit, err = ResolveSHA(m.repoPath, ref)
+		if err != nil {
+			m.resolvedCommit[ref] = ""
+			return false
+		}
+		m.resolvedCommit[ref] = commit
+	}
+	if commit == "" {
+		return false
+	}
+	_, ok = m.commits[commit]
+	return ok
+}
+
+func isFullObjectID(ref string) bool {
+	if len(ref) != 40 && len(ref) != 64 {
+		return false
+	}
+	for _, r := range ref {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // GetRepoRoot returns the root directory of the git repository
 func GetRepoRoot(path string) (string, error) {
 	cmd := newGitCmd("rev-parse", "--show-toplevel")
