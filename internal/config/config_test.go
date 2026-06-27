@@ -1933,6 +1933,98 @@ func TestResolveAgentForWorkflow(t *testing.T) {
 	}
 }
 
+// TestResolveWorkflowAnalyzeOverride covers the generic per-type
+// [analyze.<workflow>] override. Review types such as "lookahead" carry no
+// bespoke {workflow}_agent/{workflow}_model fields, so they are configured
+// entirely through this map.
+func TestResolveWorkflowAnalyzeOverride(t *testing.T) {
+	assert := assert.New(t)
+
+	lookahead := map[string]AnalyzeConfig{
+		"lookahead": {Agent: "claude-code", Model: "sonnet"},
+	}
+
+	// Repo [analyze.lookahead] drives the lookahead workflow agent/model.
+	repoCfg := &RepoConfig{Analyze: lookahead}
+	assert.Equal("claude-code",
+		ResolveAgentForWorkflowFromConfig("", repoCfg, nil, "lookahead", "thorough"))
+	assert.Equal("sonnet",
+		ResolveModelForWorkflowFromConfig("", repoCfg, nil, "lookahead", "thorough"))
+
+	// Global [analyze.lookahead] applies when the repo does not override it.
+	globalCfg := &Config{Analyze: lookahead}
+	assert.Equal("claude-code",
+		ResolveAgentForWorkflowFromConfig("", nil, globalCfg, "lookahead", "thorough"))
+	assert.Equal("sonnet",
+		ResolveModelForWorkflowFromConfig("", nil, globalCfg, "lookahead", "thorough"))
+
+	// The override is keyed by type and does not leak into other workflows.
+	assert.Equal("codex",
+		ResolveAgentForWorkflowFromConfig("", repoCfg, nil, "review", "thorough"))
+	assert.Empty(
+		ResolveModelForWorkflowFromConfig("", repoCfg, nil, "review", "thorough"))
+
+	// CLI still wins over the analyze override.
+	assert.Equal("gemini",
+		ResolveAgentForWorkflowFromConfig("gemini", repoCfg, nil, "lookahead", "thorough"))
+
+	// A per-type agent pin counts as a strict workflow override.
+	assert.True(HasWorkflowAgentOverrideFromConfig(repoCfg, nil, "lookahead", "thorough"))
+	assert.False(HasWorkflowAgentOverrideFromConfig(&RepoConfig{}, nil, "lookahead", "thorough"))
+
+	// Dedicated {type}_agent/{type}_model fields win over the analyze map, so a
+	// legacy [analyze.security] (intended for `roborev analyze security`) never
+	// hijacks a security review configured the legacy way.
+	secAnalyze := map[string]AnalyzeConfig{
+		"security": {Agent: "claude-code", Model: "sonnet"},
+	}
+	legacySecurity := &RepoConfig{
+		SecurityAgent: "codex",
+		SecurityModel: "o3",
+		Analyze:       secAnalyze,
+	}
+	assert.Equal("codex",
+		ResolveAgentForWorkflowFromConfig("", legacySecurity, nil, "security", "thorough"))
+	assert.Equal("o3",
+		ResolveModelForWorkflowFromConfig("", legacySecurity, nil, "security", "thorough"))
+
+	// Native review workflows do not fall back to [analyze.<workflow>] when the
+	// dedicated fields are unset; those tables belong to `roborev analyze`.
+	for _, workflow := range []string{"security", "design"} {
+		repoOnlyAnalyze := &RepoConfig{
+			Agent: "repo-default",
+			Model: "repo-default-model",
+			Analyze: map[string]AnalyzeConfig{
+				workflow: {Agent: "analyze-agent", Model: "analyze-model"},
+			},
+		}
+		assert.Equal("repo-default",
+			ResolveAgentForWorkflowFromConfig("", repoOnlyAnalyze, nil, workflow, "thorough"))
+		assert.Equal("repo-default-model",
+			ResolveModelForWorkflowFromConfig("", repoOnlyAnalyze, nil, workflow, "thorough"))
+		assert.Empty(
+			ResolveWorkflowModelFromConfig(repoOnlyAnalyze, nil, workflow, "thorough"))
+		assert.False(
+			HasWorkflowAgentOverrideFromConfig(repoOnlyAnalyze, nil, workflow, "thorough"))
+
+		globalOnlyAnalyze := &Config{
+			DefaultAgent: "global-default",
+			DefaultModel: "global-default-model",
+			Analyze: map[string]AnalyzeConfig{
+				workflow: {Agent: "analyze-agent", Model: "analyze-model"},
+			},
+		}
+		assert.Equal("global-default",
+			ResolveAgentForWorkflowFromConfig("", nil, globalOnlyAnalyze, workflow, "thorough"))
+		assert.Equal("global-default-model",
+			ResolveModelForWorkflowFromConfig("", nil, globalOnlyAnalyze, workflow, "thorough"))
+		assert.Empty(
+			ResolveWorkflowModelFromConfig(nil, globalOnlyAnalyze, workflow, "thorough"))
+		assert.False(
+			HasWorkflowAgentOverrideFromConfig(nil, globalOnlyAnalyze, workflow, "thorough"))
+	}
+}
+
 func TestHasWorkflowAgentOverrideFromConfig(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -3227,8 +3319,8 @@ func TestValidateReviewTypes(t *testing.T) {
 	}{
 		{
 			name:  "valid types pass through",
-			input: []string{"default", "security", "design"},
-			want:  []string{"default", "security", "design"},
+			input: []string{"default", "security", "design", "lookahead"},
+			want:  []string{"default", "security", "design", "lookahead"},
 		},
 		{
 			name:  "alias review canonicalizes",
