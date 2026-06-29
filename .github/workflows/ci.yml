@@ -11,7 +11,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  go-changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Detect Go changes
+        id: filter
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        with:
+          base: ${{ github.ref }}
+          filters: |
+            go:
+              - '*.go'
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'go.work'
+              - 'go.work.sum'
+
   test:
+    needs: go-changes
+    if: needs.go-changes.outputs.changed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +117,8 @@ jobs:
           CGO_ENABLED: 0
 
   coverage:
+    needs: go-changes
+    if: needs.go-changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -109,6 +139,8 @@ jobs:
         continue-on-error: true
 
   integration:
+    needs: go-changes
+    if: needs.go-changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -137,6 +169,8 @@ jobs:
           TEST_POSTGRES_URL: postgres://roborev_test:roborev_test_password@localhost:5433/roborev_test
 
   lint:
+    needs: go-changes
+    if: needs.go-changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -155,6 +189,8 @@ jobs:
           version: ${{ steps.golangci.outputs.version }}
 
   nix:
+    needs: go-changes
+    if: needs.go-changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
