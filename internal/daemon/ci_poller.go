@@ -3171,14 +3171,9 @@ func formatPanelPRFooter(job *storage.ReviewJob, synthesisAgent string, members 
 	if job == nil {
 		return ""
 	}
-	panelName := job.PanelName
-	if panelName == "" {
-		panelName = "panel"
-	}
 	footer := []string{
-		"Panel: " + panelName,
+		"Reviewers: " + formatPanelReviewerSummary(members),
 		"Synthesis: " + formatPanelSynthesis(job, synthesisAgent, includeCosts),
-		"Members: " + formatPanelSubagents(members, includeCosts),
 	}
 	if total := formatPanelTotal(job, members, includeCosts); total != "" {
 		footer = append(footer, "Total: "+total)
@@ -3190,14 +3185,9 @@ func formatCompactPanelPRFooter(job *storage.ReviewJob, synthesisAgent string, m
 	if job == nil {
 		return ""
 	}
-	panelName := job.PanelName
-	if panelName == "" {
-		panelName = "panel"
-	}
 	footer := []string{
-		"Panel: " + panelName,
+		"Reviewers: " + formatPanelReviewerSummary(members),
 		"Synthesis: " + formatPanelSynthesis(job, synthesisAgent, includeCosts),
-		fmt.Sprintf("Members: %d members (details omitted; footer too large)", len(members)),
 	}
 	if total := formatPanelTotal(job, members, includeCosts); total != "" {
 		footer = append(footer, "Total: "+total)
@@ -3224,36 +3214,56 @@ func formatPanelSynthesis(job *storage.ReviewJob, synthesisAgent string, include
 	return strings.Join(parts, ", ")
 }
 
-func formatPanelSubagents(members []storage.BatchReviewResult, includeCosts bool) string {
+func formatPanelReviewerSummary(members []storage.BatchReviewResult) string {
 	if len(members) == 0 {
 		return "none"
 	}
-	parts := make([]string, 0, len(members))
+	counts := make(map[string]int)
 	for _, m := range members {
-		name := m.PanelMemberName
-		if name == "" {
-			name = m.Agent
-		}
-		detail := m.Agent
-		if m.ReviewType != "" {
-			detail += "/" + m.ReviewType
-		}
-		status := m.Status
-		if status == "" {
-			status = "unknown"
-		}
-		detail += ", " + status
-		if runtime := formatRuntimeStrings(m.StartedAt, m.FinishedAt); runtime != "" {
-			detail += ", " + runtime
-		}
-		if includeCosts {
-			if cost := formatCost(m.TokenUsage); cost != "" {
-				detail += ", " + cost
-			}
-		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", name, detail))
+		counts[formatPanelReviewerStatus(m)]++
 	}
-	return strings.Join(parts, ", ")
+	statuses := []string{"done", "failed", "canceled", "skipped", "running", "queued", "unknown"}
+	seen := make(map[string]struct{}, len(statuses))
+	parts := make([]string, 0, len(counts))
+	for _, status := range statuses {
+		seen[status] = struct{}{}
+		if count := counts[status]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", count, status))
+		}
+	}
+	var extra []string
+	for status := range counts {
+		if _, ok := seen[status]; !ok {
+			extra = append(extra, status)
+		}
+	}
+	sort.Strings(extra)
+	for _, status := range extra {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return fmt.Sprintf("%d total (%s)", len(members), strings.Join(parts, ", "))
+}
+
+func formatPanelReviewerStatus(member storage.BatchReviewResult) string {
+	result := toReviewResult(member)
+	switch {
+	case result.Skipped || result.Status == reviewpkg.ResultSkipped:
+		return "skipped"
+	case reviewpkg.IsQuotaFailure(result):
+		return "skipped"
+	case reviewpkg.IsTimeoutCancellation(result):
+		return "skipped"
+	case reviewpkg.IsTransientFailure(result):
+		return "skipped"
+	}
+	status := strings.TrimSpace(member.Status)
+	if status == "" {
+		return "unknown"
+	}
+	return status
 }
 
 func formatPanelTotal(synth *storage.ReviewJob, members []storage.BatchReviewResult, includeCosts bool) string {
@@ -3309,14 +3319,6 @@ func panelTotalCost(synth *storage.ReviewJob, members []storage.BatchReviewResul
 
 func formatRuntime(startedAt, finishedAt *time.Time) string {
 	runtime := runtimeFromTimes(startedAt, finishedAt)
-	if runtime <= 0 {
-		return ""
-	}
-	return runtime.Round(time.Second).String()
-}
-
-func formatRuntimeStrings(startedAt, finishedAt string) string {
-	runtime := runtimeFromStrings(startedAt, finishedAt)
 	if runtime <= 0 {
 		return ""
 	}
